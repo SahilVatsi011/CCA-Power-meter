@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CCA Power Meter Dashboard - IIT Mandi</title>
+    <link rel="stylesheet" href="/static/css/styles.css?v=15">
+</head>
+<body>
+    <div id="jsErrorBanner" hidden></div>
+    <script>
+        (function () {
+            var shown = false;
+            function show(msg) {
+                var b = document.getElementById('jsErrorBanner');
+                if (!b) return;
+                if (!shown) { b.textContent = ''; shown = true; }
+                b.textContent += '+ ' + msg + '  ';
+                b.hidden = false;
+            }
+            window.addEventListener('error', function (ev) {
+                var src = (ev.filename || '').split('/').pop() || '';
+                show((ev.message || 'script error') + (src ? ' @' + src + ':' + (ev.lineno || '') : ''));
+            });
+            window.addEventListener('unhandledrejection', function (ev) {
+                show('promise: ' + String((ev.reason && ev.reason.message) || ev.reason || 'rejected'));
+            });
+        })();
+    </script>
+    <header>
+        <div class="logo">
+            <h1>CCA Power Meter Dashboard</h1>
+            <div class="subtitle">Climate Controlled Agriculture | IIT Mandi Control Lab</div>
+        </div>
+        <div class="header-info">
+            <div class="status-badge" id="statusBadge">
+                <div class="status-dot"></div>
+                <span id="statusText">Connecting...</span>
+            </div>
+            <div class="switch-badge" id="switchBadge" hidden>
+                <span id="switchText">Switch: --</span>
+            </div>
+            <div class="db-badge" id="dbBadge" title="MongoDB storage status">
+                <span id="dbText">DB: connecting...</span>
+            </div>
+            <div class="last-updated">Updated: <span id="lastUpdated">--</span></div>
+            <button class="theme-toggle" id="themeToggle" title="Toggle light / dark theme">Light</button>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="summary-grid">
+            <div class="summary-card power">
+                <div class="summary-label">Active Power</div>
+                <div class="summary-value" id="sumPower">--<span class="unit">W</span></div>
+                <div class="summary-sub">Real-time consumption</div>
+            </div>
+            <div class="summary-card voltage">
+                <div class="summary-label">Voltage</div>
+                <div class="summary-value" id="sumVoltage">--<span class="unit">V</span></div>
+                <div class="summary-sub" id="sumVoltageSub">Phase A</div>
+            </div>
+            <div class="summary-card current">
+                <div class="summary-label">Current</div>
+                <div class="summary-value" id="sumCurrent">--<span class="unit">A</span></div>
+                <div class="summary-sub" id="sumCurrentSub">Phase A</div>
+            </div>
+            <div class="summary-card energy">
+                <div class="summary-label">Total Energy</div>
+                <div class="summary-value" id="sumEnergy">--<span class="unit">kWh</span></div>
+                <div class="summary-sub">Forward energy</div>
+            </div>
+            <div class="summary-card temp">
+                <div class="summary-label">Temperature</div>
+                <div class="summary-value" id="sumTemp">--<span class="unit">°C</span></div>
+                <div class="summary-sub">Device temp</div>
+            </div>
+            <div class="summary-card status">
+                <div class="summary-label">Power Factor</div>
+                <div class="summary-value" id="sumPF">--<span class="unit"></span></div>
+                <div class="summary-sub" id="sumFault">No faults</div>
+            </div>
+        </div>
+
+        <div class="chart-section">
+            <div class="chart-header">
+                <div class="section-title">Power Consumption Over Time</div>
+                <div class="controls">
+                    <button class="btn active" data-range="1h">1H</button>
+                    <button class="btn" data-range="6h">6H</button>
+                    <button class="btn" data-range="24h">24H</button>
+                    <button class="btn" data-range="7d">7D</button>
+                    <button class="btn" data-range="30d">30D</button>
+                    <button class="btn" data-range="live">LIVE</button>
+                    <button class="btn" id="openCustomBtn" title="Analyze a custom date range">Custom</button>
+                </div>
+            </div>
+            <div class="custom-range" id="customRangeBar" hidden>
+                <span>Data Analyzer:</span>
+                <label>From <input type="date" id="cFromDate"> <input type="time" id="cFromTime" step="60"></label>
+                <label>To <input type="date" id="cToDate"> <input type="time" id="cToTime" step="60"></label>
+                <button class="btn primary" id="applyCustom">Analyze</button>
+                <button class="btn" id="closeCustom">Close</button>
+            </div>
+            <div class="chart-canvas-wrap"><canvas id="powerChart"></canvas></div>
+        </div>
+
+        <div class="chart-section">
+            <div class="chart-header">
+                <div class="section-title">Voltage &amp; Current</div>
+                <div class="controls">
+                    <button class="btn" id="openExportBtn" title="Download data as CSV or Excel">Download Data</button>
+                </div>
+            </div>
+            <div class="chart-canvas-wrap"><canvas id="vcChart"></canvas></div>
+        </div>
+
+        <div class="dual-grid">
+            <div class="chart-section">
+                <div class="chart-header">
+                    <div class="section-title">Total Consumption &amp; Billing</div>
+                </div>
+                <div class="controls" id="consControls">
+                    <button class="btn cons-range active" data-conh="1">1H</button>
+                    <button class="btn cons-range" data-conh="6">6H</button>
+                    <button class="btn cons-range" data-conh="12">12H</button>
+                    <button class="btn cons-range" data-conh="24">1D</button>
+                    <button class="btn cons-range" data-conh="168">7D</button>
+                    <button class="btn cons-range" data-conh="720">30D</button>
+                    <button class="btn" id="consCustomBtn">Custom</button>
+                </div>
+                <div class="custom-range" id="consRangeBar" hidden>
+                    <span>From</span>
+                    <input type="date" id="cFromDate2"><input type="time" id="cFromTime2" step="60">
+                    <span>To</span>
+                    <input type="date" id="cToDate2"><input type="time" id="cToTime2" step="60">
+                    <button class="btn primary" id="applyConsCustom">Go</button>
+                    <button class="btn" id="closeConsCustom">Close</button>
+                </div>
+                <div class="bill-box">
+                    <div class="bill-row"><span>Consumption</span><strong id="consUnits">-- units</strong></div>
+                    <div class="bill-row"><span>From</span><span id="consFromLabel">--</span></div>
+                    <div class="bill-row"><span>To</span><span id="consToLabel">--</span></div>
+                    <div class="bill-row"><span>Est. Cost @ rate</span><strong id="consCost" style="color:var(--accent-green)">--</strong></div>
+                </div>
+                <div class="calc-title">Unit Converter &amp; Price Calculator</div>
+                <div class="calc-grid">
+                    <label>Units (kWh)
+                        <input type="number" id="calcUnits" step="any" min="0">
+                    </label>
+                    <label>Rate (₹/unit)
+                        <input type="number" id="calcRate" step="any" min="0" value="6.39">
+                    </label>
+                    <button class="btn primary" id="calcBtn" title="Convert units to price">Calculate</button>
+                </div>
+                <div class="calc-result" id="calcResult"></div>
+                <div class="calc-note">HPSEBL Commercial (CS) tariff &mdash; &le;20 kVA: &#8377;6.39/unit + &#8377;145/month fixed &middot; 1 unit = 1 kWh.</div>
+            </div>
+            <div class="chart-section">
+                <div class="chart-header"><div class="section-title">Alarm Settings</div></div>
+                <div id="alarmCard" class="prepaid-body">
+                    <div class="loading-inline">Waiting for device data...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="dual-grid">
+        <div class="chart-section">
+            <div class="chart-header">
+                <div class="section-title">Faults &amp; Power Cut Log</div>
+                <div class="controls">
+                    <button class="btn ev-window active" data-ewin="24h">24H</button>
+                    <button class="btn ev-window" data-ewin="7d">7D</button>
+                    <button class="btn ev-window" data-ewin="30d">30D</button>
+                    <select id="evFormat" title="Export format">
+                        <option value="csv">CSV</option>
+                        <option value="xlsx">Excel</option>
+                    </select>
+                    <button class="btn" id="exportEventsBtn" title="Download events (time + type) for selected window">Export</button>
+                </div>
+            </div>
+            <div class="chart-canvas-wrap event-chart-wrap"><canvas id="eventChart"></canvas></div>
+            <div class="event-summary" id="eventSummary">Loading events...</div>
+            <div id="eventList" class="event-list"></div>
+        </div>
+
+        <div class="chart-section">
+            <div class="chart-header">
+                <div class="section-title">Recent Readings Log</div>
+                <div class="controls"><button class="btn ev-window" disabled title="Last 10 readings">Last 10</button></div>
+            </div>
+            <div style="overflow-x:auto">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>V</th>
+                            <th>A</th>
+                            <th>W</th>
+                            <th>kWh</th>
+                            <th>°C</th>
+                            <th>PF</th>
+                        </tr>
+                    </thead>
+                    <tbody id="logBody">
+                        <tr><td colspan="7" style="text-align:center;color:var(--text-secondary)">Waiting for data...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        </div>
+    </div>
+
+    <div class="modal" id="exportModal" hidden>
+        <div class="modal-overlay" data-close-export></div>
+        <div class="modal-box">
+            <div class="modal-header">
+                <div class="section-title">Download Readings</div>
+                <button class="modal-close" data-close-export>&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-grid">
+                    <label>Format
+                        <select id="expFormat">
+                            <option value="csv">CSV</option>
+                            <option value="xlsx">Excel (.xlsx)</option>
+                        </select>
+                    </label>
+                    <label>Interval
+                        <select id="expInterval">
+                            <option value="raw">Raw (30s)</option>
+                            <option value="1min">1 minute</option>
+                            <option value="5min">5 minutes</option>
+                            <option value="15min">15 minutes</option>
+                            <option value="hourly">Hourly</option>
+                        </select>
+                    </label>
+                    <label>From
+                        <span class="dt-inputs"><input type="date" id="expFromDate"><input type="time" id="expFromTime" step="60"></span>
+                    </label>
+                    <label>To
+                        <span class="dt-inputs"><input type="date" id="expToDate"><input type="time" id="expToTime" step="60"></span>
+                    </label>
+                </div>
+                <div class="field-picker">
+                    <div class="field-picker-title">Fields to include <span class="field-note">(time &amp; device ID always included)</span></div>
+                    <div class="field-grid">
+                        <label><input type="checkbox" class="exp-field" value="v" checked> Voltage (V)</label>
+                        <label><input type="checkbox" class="exp-field" value="a" checked> Current (A)</label>
+                        <label><input type="checkbox" class="exp-field" value="w" checked> Power (W)</label>
+                        <label><input type="checkbox" class="exp-field" value="pf" checked> Power Factor</label>
+                        <label><input type="checkbox" class="exp-field" value="kwh" checked> Energy (kWh)</label>
+                        <label><input type="checkbox" class="exp-field" value="temp" checked> Temperature (°C)</label>
+                        <label><input type="checkbox" class="exp-field" value="leak" checked> Leakage (mA)</label>
+                    </div>
+                </div>
+                <div class="export-status" id="exportStatus"></div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn" data-close-export>Cancel</button>
+                <button class="btn primary" id="doExport">Download</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="passcodeModal" hidden>
+        <div class="modal-overlay" data-close-pass></div>
+        <div class="modal-box passcode-box">
+            <div class="modal-header">
+                <div class="section-title">Enter Password</div>
+                <button class="modal-close" data-close-pass>&times;</button>
+            </div>
+            <div class="modal-body">
+                <label>Password
+                    <input type="password" id="passInput" placeholder="4-digit password" inputmode="numeric" autocomplete="off" style="padding:0.5rem 0.6rem;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:0.95rem;width:100%;">
+                </label>
+                <div class="export-status" id="passStatus"></div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn" data-close-pass>Cancel</button>
+                <button class="btn primary" id="passOk">Unlock</button>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <div>CCA Power Meter Dashboard &mdash; IIT Mandi Control Lab &mdash; Real-time data via Tuya Cloud API &amp; MongoDB Atlas</div>
+        <div class="footer-credit">Made with <span class="h">&#9829;</span> by <strong>Sahil Vatsi</strong> &middot; M.Tech Scholar &middot; SCEE &middot; IIT Mandi</div>
+    </footer>
+
+    <script src="/static/vendor/chart.umd.min.js?v=15"></script>
+    <script src="/static/js/charts.js?v=15"></script>
+    <script src="/static/js/prepaid.js?v=15"></script>
+    <script src="/static/js/app.js?v=15"></script>
+</body>
+</html>
