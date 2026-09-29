@@ -3,10 +3,33 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CCA Power Meter Dashboard - IIT Mandi</title>
-    <link rel="stylesheet" href="/static/css/styles.css?v=15">
+    <title>ThingMIC | CCA Power Meter Dashboard</title>
+    <link rel="stylesheet" href="/static/css/styles.css?v=18">
 </head>
 <body>
+    <!-- ══ ThingMIC Splash Screen ══ -->
+    <div id="splash">
+        <div class="splash-bg"></div>
+        <div class="splash-particles" id="splashParticles"></div>
+        <div class="splash-content">
+            <div class="splash-logo-wrap">
+                <div class="splash-ring"></div>
+                <div class="splash-ring splash-ring-2"></div>
+                <div class="splash-logo-box">
+                    <img src="/static/img/thingmic-logo.png" alt="ThingMIC" class="splash-logo">
+                </div>
+            </div>
+            <div class="splash-text">
+                <span class="splash-letter" style="--i:0">T</span><span class="splash-letter" style="--i:1">h</span><span class="splash-letter" style="--i:2">i</span><span class="splash-letter" style="--i:3">n</span><span class="splash-letter" style="--i:4">g</span><span class="splash-letter splash-letter-brand" style="--i:5">M</span><span class="splash-letter splash-letter-brand" style="--i:6">I</span><span class="splash-letter splash-letter-brand" style="--i:7">C</span>
+            </div>
+            <div class="splash-tagline">Intelligent IoT Engine</div>
+            <div class="splash-loader">
+                <div class="splash-loader-bar"></div>
+            </div>
+            <div class="splash-loading-text">Initializing systems<span class="splash-dots"></span></div>
+        </div>
+    </div>
+
     <div id="jsErrorBanner" hidden></div>
     <script>
         (function () {
@@ -29,8 +52,13 @@
     </script>
     <header>
         <div class="logo">
-            <h1>CCA Power Meter Dashboard</h1>
-            <div class="subtitle">Climate Controlled Agriculture | IIT Mandi Control Lab</div>
+            <div class="logo-box">
+                <img src="/static/img/thingmic-logo.png" alt="ThingMIC" class="logo-img">
+            </div>
+            <div>
+                <h1>CCA Power Meter Dashboard</h1>
+                <div class="subtitle"><span class="brand-thingmic">ThingMIC</span> Engine | Climate Controlled Agriculture | IIT Mandi</div>
+            </div>
         </div>
         <div class="header-info">
             <div class="status-badge" id="statusBadge">
@@ -284,13 +312,41 @@
     </div>
 
     <footer>
-        <div>CCA Power Meter Dashboard &mdash; IIT Mandi Control Lab &mdash; Real-time data via Tuya Cloud API &amp; MongoDB Atlas</div>
+        <div>Powered by <strong>ThingMIC</strong> &mdash; CCA Power Meter Dashboard &mdash; IIT Mandi Control Lab</div>
         <div class="footer-credit">Made with <span class="h">&#9829;</span> by <strong>Sahil Vatsi</strong> &middot; M.Tech Scholar &middot; SCEE &middot; IIT Mandi</div>
     </footer>
 
-    <script src="/static/vendor/chart.umd.min.js?v=15"></script>
-    <script src="/static/js/charts.js?v=15"></script>
-    <script src="/static/js/prepaid.js?v=15"></script>
-    <script src="/static/js/app.js?v=15"></script>
+    <script src="/static/vendor/chart.umd.min.js?v=18"></script>
+    <script src="/static/js/charts.js?v=18"></script>
+    <script src="/static/js/prepaid.js?v=18"></script>
+    <script src="/static/js/app.js?v=18"></script>
+    <script>
+    (function(){
+        // spawn floating particles
+        var pc = document.getElementById('splashParticles');
+        if(pc) for(var i=0;i<30;i++){
+            var d=document.createElement('div');
+            d.className='splash-particle';
+            d.style.left=Math.random()*100+'%';
+            d.style.top=Math.random()*100+'%';
+            d.style.animationDelay=Math.random()*3+'s';
+            d.style.animationDuration=(2+Math.random()*4)+'s';
+            d.style.width=d.style.height=(2+Math.random()*4)+'px';
+            pc.appendChild(d);
+        }
+        // dismiss splash after load
+        function dismiss(){
+            var s=document.getElementById('splash');
+            if(!s)return;
+            s.classList.add('splash-exit');
+            setTimeout(function(){ s.remove(); },800);
+        }
+        // min 2.8s display, then wait for DOMContentLoaded
+        var ready=false, timer=false;
+        setTimeout(function(){ timer=true; if(ready) dismiss(); },2800);
+        if(document.readyState!=='loading') { ready=true; if(timer) dismiss(); }
+        else document.addEventListener('DOMContentLoaded',function(){ ready=true; if(timer) dismiss(); });
+    })();
+    </script>
 </body>
 </html>
