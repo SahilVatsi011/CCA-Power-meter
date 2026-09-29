@@ -110,6 +110,8 @@ window.CCA = window.CCA || {};
         power_restored: ['Power Restored', 'restore'],
         fault: ['Fault', 'fault'],
         fault_cleared: ['Fault Cleared', 'clear'],
+        network_off: ['Device Network Off', 'netoff'],
+        network_on: ['Device Back Online', 'neton'],
     };
 
     function renderEventList(data) {
@@ -119,7 +121,8 @@ window.CCA = window.CCA || {};
         const t = data.totals || {};
         const plc = t.cuts === 1 ? '' : 's';
         const plf = t.faults === 1 ? '' : 's';
-        summary.innerHTML = `Last ${data.range_hours}h &mdash; <span class="ev-num cut">${t.cuts} power cut${plc}</span> &middot; <span class="ev-num fault">${t.faults} fault${plf}</span> &middot; <span class="ev-num restore">${t.restores} restore${t.restores === 1 ? '' : 's'}</span>`;
+        const pln = t.netdowns === 1 ? '' : 's';
+        summary.innerHTML = `Last ${data.range_hours}h &mdash; <span class="ev-num cut">${t.cuts} power cut${plc}</span> &middot; <span class="ev-num fault">${t.faults} fault${plf}</span> &middot; <span class="ev-num restore">${t.restores} restore${t.restores === 1 ? '' : 's'}</span>${t.netdowns ? ` &middot; <span class="ev-num netdown">${t.netdowns} network off${pln}</span>` : ''}`;
         if (!data.recent || !data.recent.length) {
             list.innerHTML = '<div class="loading-inline">No events recorded yet — events appear when the switch turns off/on or a fault triggers.</div>';
             return;

@@ -357,7 +357,8 @@ def event_stats(range_hours):
 
     totals = {"cuts": sum(b["cuts"] for b in buckets.values()),
               "faults": sum(b["faults"] for b in buckets.values()),
-              "restores": sum(b["restores"] for b in buckets.values())}
+              "restores": sum(b["restores"] for b in buckets.values()),
+              "netdowns": sum(1 for ev in events if ev.get("event_type") == "network_off")}
 
     return {"success": True, "range_hours": range_hours, "bucket_sec": bucket_sec,
             "series": series, "recent": recent, "totals": totals}

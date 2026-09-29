@@ -34,6 +34,7 @@ _token_cache = {"access_token": None, "expire_time": 0}
 _last_raw_cache = {}
 _last_all_status = []
 _last_ev_state = {}
+_prev_online = {}
 
 
 def _make_signed_request(method, path, token=None, timeout=API_TIMEOUT):
@@ -154,6 +155,18 @@ def process_device_status(status_list):
 
 def _maybe_log_events(dev):
     dev_id = dev["id"]
+    online = bool(dev.get("online"))
+
+    prev_online = _prev_online.get(dev_id)
+    if prev_online is None:
+        _prev_online[dev_id] = online
+    elif prev_online != online:
+        if not online:
+            db.log_event(dev_id, "network_off", detail="device network off")
+        else:
+            db.log_event(dev_id, "network_on", detail="device back online")
+        _prev_online[dev_id] = online
+
     metrics = dev.get("metrics") or {}
     switch = metrics.get("switch", {}).get("value")
     fault_info = metrics.get("fault") or {}
@@ -252,9 +265,9 @@ def get_all_status():
         _last_all_status = results
 
         for dev in results:
+            _maybe_log_events(dev)
             if dev["online"]:
                 db.log_reading(dev["id"], dev["name"], dev["metrics"])
-                _maybe_log_events(dev)
         db.run_rollups()
 
         return jsonify({"success": True, "devices": results})

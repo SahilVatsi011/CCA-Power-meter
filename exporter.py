@@ -195,6 +195,8 @@ EVENT_LABELS = {
     "power_restored": "Power Restored",
     "fault": "Fault",
     "fault_cleared": "Fault Cleared",
+    "network_off": "Device Network Off",
+    "network_on": "Device Back Online",
 }
 
 
