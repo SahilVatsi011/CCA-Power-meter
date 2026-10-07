@@ -8,6 +8,9 @@ window.CCA = window.CCA || {};
     let mode = '1h';
     let currentRange = '1h';
 
+    const PAGE_DEVICE = window.PAGE_DEVICE_ID || null;
+    const devQS = () => (PAGE_DEVICE ? 'device=' + encodeURIComponent(PAGE_DEVICE) : '');
+
     const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || null;
     const gridStyle = { color: cssVar('--chart-grid') || 'rgba(51, 65, 85, 0.5)' };
     const tickStyle = { color: cssVar('--chart-tick') || '#94a3b8' };
@@ -140,7 +143,7 @@ window.CCA = window.CCA || {};
         if (!eventChart) return;
         let resp;
         try {
-            resp = await fetch('/api/events?window=' + encodeURIComponent(window));
+            resp = await fetch('/api/events?window=' + encodeURIComponent(window) + (devQS() ? '&' + devQS() : ''));
         } catch {
             return;
         }
@@ -214,7 +217,7 @@ window.CCA = window.CCA || {};
         currentRange = range;
         let resp;
         try {
-            resp = await fetch('/api/history?range=' + encodeURIComponent(range));
+            resp = await fetch('/api/history?range=' + encodeURIComponent(range) + (devQS() ? '&' + devQS() : ''));
         } catch {
             return;
         }
@@ -229,7 +232,7 @@ window.CCA = window.CCA || {};
         currentRange = null;
         let resp;
         try {
-            resp = await fetch(`/api/history?from=${fromSec}&to=${toSec}`);
+            resp = await fetch(`/api/history?from=${fromSec}&to=${toSec}` + (devQS() ? '&' + devQS() : ''));
         } catch {
             return;
         }

@@ -159,15 +159,17 @@ def _lan_get_device_status():
 
 def _device_summaries_lan():
     """Build device summary list from LAN status (same shape as cloud version)."""
+    dev_id = config.TUYA_DEVICE_ID
     status_list, is_online, raw_dps = _lan_get_device_status()
     metrics = process_device_status(status_list) if status_list else {}
     return [{
-        "id": config.TUYA_DEVICE_ID,
-        "name": config.TUYA_DEVICE_NAME,
+        "id": dev_id,
+        "name": config.device_name(dev_id, config.TUYA_DEVICE_NAME),
         "product_name": "单相彩屏",
         "online": is_online,
         "category": "dlq",
         "model": "",
+        "site": config.site_for(dev_id),
         "raw_status": status_list,
         "metrics": metrics,
         "_raw_dps": raw_dps,
@@ -347,11 +349,12 @@ def _device_summaries(devices):
         metrics = process_device_status(raw_status)
         results.append({
             "id": dev_id,
-            "name": device.get("name", "Unknown"),
+            "name": config.device_name(dev_id, device.get("name", "Unknown")),
             "product_name": device.get("productName", ""),
             "online": device.get("isOnline", False),
             "category": device.get("category", ""),
             "model": device.get("model", ""),
+            "site": config.site_for(dev_id),
             "raw_status": raw_status,
             "metrics": metrics,
         })
@@ -427,6 +430,13 @@ def index():
     return resp
 
 
+@app.route("/hydro")
+def hydro():
+    resp = send_from_directory(app.static_folder, "hydro.html")
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
 @app.route("/api/devices")
 def get_devices():
     if not _cache_fresh():
@@ -468,10 +478,15 @@ def get_all_status():
             _refresh_now()
     except Exception as e:
         error = str(e)
+    device_id = request.args.get("device") or None
+    devices = _last_all_status
+    if device_id:
+        devices = [d for d in _last_all_status if d["id"] == device_id]
     return jsonify({
         "success": True,
         "error": error,
-        "devices": _last_all_status,
+        "device": device_id,
+        "devices": devices,
         "polled_at": _last_polled_at,
         "stale": not _cache_fresh(),
     })
@@ -479,6 +494,7 @@ def get_all_status():
 
 @app.route("/api/history")
 def get_history():
+    device_id = request.args.get("device") or None
     from_arg = request.args.get("from")
     to_arg = request.args.get("to")
     if from_arg and to_arg:
@@ -489,14 +505,14 @@ def get_history():
             return jsonify({"success": False, "error": "from/to must be unix timestamps"})
         if to_ts <= from_ts:
             return jsonify({"success": False, "error": "to must be after from"})
-        return jsonify(db.history_between(from_ts, to_ts))
+        return jsonify(db.history_between(from_ts, to_ts, device_id=device_id))
 
     range_name = request.args.get("range", "24h")
     range_map = {"1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720}
     range_hours = range_map.get(range_name)
     if not range_hours:
         return jsonify({"success": False, "error": "invalid range"})
-    return jsonify(db.history(range_hours))
+    return jsonify(db.history(range_hours, device_id=device_id))
 
 
 def _row_for(doc):
@@ -551,6 +567,7 @@ def _parse_export_args():
 def api_export():
     if request.args.get("pass") != config.EXPORT_PASSWORD:
         return jsonify({"success": False, "error": "Wrong password"}), 401
+    device_id = request.args.get("device") or None
     format_name = request.args.get("format", "csv")
     interval = request.args.get("interval", "raw")
     fields_arg = request.args.get("fields", "")
@@ -571,14 +588,14 @@ def api_export():
 
     try:
         if format_name in ("csv", "text/csv"):
-            data = exporter.build_csv(from_ts, to_ts, interval, columns)
+            data = exporter.build_csv(from_ts, to_ts, interval, columns, device_id=device_id)
             return Response(
                 data,
                 mimetype="text/csv",
                 headers={"Content-Disposition": f"attachment; filename=readings_{interval}.csv"},
             )
         if format_name in ("xlsx", "excel"):
-            data = exporter.build_xlsx(from_ts, to_ts, interval, columns)
+            data = exporter.build_xlsx(from_ts, to_ts, interval, columns, device_id=device_id)
             return Response(
                 data,
                 mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -592,6 +609,7 @@ def api_export():
 @app.route("/api/export.csv")
 def export_csv():
     now = datetime.now(timezone.utc)
+    device_id = request.args.get("device") or None
     from_arg = request.args.get("from")
     to_arg = request.args.get("to")
     try:
@@ -606,7 +624,7 @@ def export_csv():
 
     def generate():
         yield ",".join(header) + "\n"
-        for doc in db.iter_readings(from_ts, to_ts):
+        for doc in db.iter_readings(from_ts, to_ts, device_id=device_id):
             row = _row_for(doc)
             yield ",".join("" if v is None else str(v) for v in row) + "\n"
 
@@ -624,11 +642,13 @@ def api_events():
         return jsonify({"success": False, "error": "invalid window"})
     if not db.is_connected():
         return jsonify({"success": False, "error": "DB not connected"})
-    return jsonify(db.event_stats(window_map[window]))
+    device_id = request.args.get("device") or None
+    return jsonify(db.event_stats(window_map[window], device_id=device_id))
 
 
 @app.route("/api/consumption")
 def api_consumption():
+    device_id = request.args.get("device") or None
     from_arg = request.args.get("from")
     to_arg = request.args.get("to")
     try:
@@ -640,7 +660,7 @@ def api_consumption():
         return jsonify({"success": False, "error": "DB not connected"})
     if to_ts <= from_ts:
         return jsonify({"success": False, "error": "to must be after from"})
-    result = db.consumption(from_ts, to_ts)
+    result = db.consumption(from_ts, to_ts, device_id=device_id)
     return jsonify({
         "success": True,
         "from": int(from_ts.timestamp()),
@@ -654,6 +674,7 @@ def api_consumption():
 def api_export_events():
     if request.args.get("pass") != config.EXPORT_PASSWORD:
         return jsonify({"success": False, "error": "Wrong password"}), 401
+    device_id = request.args.get("device") or None
     format_name = request.args.get("format", "csv")
     now = datetime.now(timezone.utc)
     from_arg = request.args.get("from")
@@ -666,7 +687,7 @@ def api_export_events():
     if not db.is_connected():
         return jsonify({"success": False, "error": "DB not connected"})
 
-    evs = db.query_events(from_ts, to_ts)
+    evs = db.query_events(from_ts, to_ts, device_id=device_id)
     if format_name in ("xlsx", "excel"):
         return Response(
             exporter.build_events_xlsx(evs),
@@ -687,8 +708,11 @@ def api_db_stats():
 
 @app.route("/api/raw-dump")
 def raw_dump():
+    device_id = request.args.get("device") or None
     summary = []
     for dev in _last_all_status:
+        if device_id and dev["id"] != device_id:
+            continue
         summary.append({
             "id": dev["id"],
             "name": dev["name"],
@@ -719,7 +743,7 @@ if __name__ == "__main__":
     if config.USE_LAN:
         print(f"\nStarting CCA Power Meter Dashboard (LAN mode)")
         print(f"  Device: {config.TUYA_DEVICE_ID}")
-        print(f"  Name:   {config.TUYA_DEVICE_NAME}")
+        print(f"  Name:   {config.device_name(config.TUYA_DEVICE_ID, config.TUYA_DEVICE_NAME)}")
         ip = config.TUYA_DEVICE_IP or "auto-discover"
         print(f"  IP:     {ip}")
     elif config.TUYA_ACCESS_ID and config.TUYA_ACCESS_SECRET:
@@ -731,6 +755,9 @@ if __name__ == "__main__":
         print("Option 1 (LAN): Set TUYA_DEVICE_ID and TUYA_LOCAL_KEY in .env")
         print("Option 2 (Cloud): Set TUYA_ACCESS_ID and TUYA_ACCESS_SECRET in .env")
         print("=" * 60 + "\n")
+
+    for did, info in config.DEVICES.items():
+        print(f"  Device: {info['name']} [{info['site']}] -> {did}")
 
     if db.connect():
         print(f"  MongoDB connected: {config.MONGODB_DB}")

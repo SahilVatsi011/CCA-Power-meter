@@ -4,6 +4,18 @@ window.CCA = window.CCA || {};
     const $ = (id) => document.getElementById(id);
     const esc = (s) => String(s == null ? '--' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+    const PAGE_DEVICE = window.PAGE_DEVICE_ID || null;
+    const devQS = () => (PAGE_DEVICE ? 'device=' + encodeURIComponent(PAGE_DEVICE) : '');
+
+    function addSiteChip() {
+        if (!window.PAGE_TITLE) return;
+        const chip = document.createElement('div');
+        chip.className = 'site-chip';
+        chip.textContent = window.PAGE_TITLE;
+        const hi = document.querySelector('.header-info');
+        if (hi) hi.insertBefore(chip, hi.firstChild);
+    }
+
     function setStatus(cls, text) {
         const badge = $('statusBadge');
         badge.className = 'status-badge ' + cls;
@@ -29,7 +41,7 @@ window.CCA = window.CCA || {};
     async function fetchData() {
         let data;
         try {
-            const resp = await fetch('/api/all-status');
+            const resp = await fetch('/api/all-status' + (devQS() ? '?' + devQS() : ''));
             data = await resp.json();
         } catch (err) {
             setStatus('error', 'Error');
@@ -244,6 +256,7 @@ window.CCA = window.CCA || {};
                 from: String(from), to: String(to),
                 fields: fields.join(','),
             });
+            if (devQS()) qs.set('device', PAGE_DEVICE);
             const pass = await askPasscode();
             if (!pass) return;
             qs.set('pass', pass);
@@ -322,7 +335,7 @@ window.CCA = window.CCA || {};
             if (!pass) return;
             if (status) { status.textContent = 'Checking password...'; status.className = 'export-status'; }
             try {
-                const resp = await fetch(`/api/export-events?from=${from}&to=${to}&format=${fmt}&pass=${encodeURIComponent(pass)}`);
+                const resp = await fetch(`/api/export-events?from=${from}&to=${to}&format=${fmt}&pass=${encodeURIComponent(pass)}` + (devQS() ? '&' + devQS() : ''));
                 if (!resp.ok) {
                     let msg = 'Export failed.';
                     try {
@@ -411,7 +424,7 @@ window.CCA = window.CCA || {};
             $('consUnits').textContent = 'Calculating...';
             $('consCost').textContent = '--';
             try {
-                const resp = await fetch(`/api/consumption?from=${fromSec}&to=${toSec}`);
+                const resp = await fetch(`/api/consumption?from=${fromSec}&to=${toSec}` + (devQS() ? '&' + devQS() : ''));
                 const data = await resp.json();
                 if (!data.success) {
                     $('consUnits').textContent = 'Error';
@@ -483,6 +496,7 @@ window.CCA = window.CCA || {};
             CCA.initCharts();
         }
         initTheme();
+        addSiteChip();
         bindRangeButtons();
         initExport();
         initCustomRange();

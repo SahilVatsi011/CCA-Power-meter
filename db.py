@@ -4,6 +4,10 @@ Provides a lazy connection, raw-reading inserts with a short dedup window,
 minute/hourly rollups with upserts, history queries, CSV streaming and
 storage statistics. Every function is safe to call when Mongo is not
 configured - the dashboard keeps working, just without persistence.
+
+Meters are kept in separate "sites" (polyhouse / hydroponics). Each site owns
+its own raw + rollup collections, and every query is device-scoped, so data
+from two meters can never mix.
 """
 
 import threading
@@ -23,8 +27,8 @@ _connect_lock = threading.Lock()
 
 _last_raw_ts = {}
 _rollup_lock = threading.Lock()
-_last_minute_done = None
-_last_hour_done = None
+_last_minute_done = {}
+_last_hour_done = {}
 
 DEVICE_FIELDS = {
     "v": ("phase_a", "voltage"),
@@ -71,17 +75,20 @@ def connect():
 def _ensure_indexes():
     if _db is None:
         return
-    raw = _db[config.SERVER_DB]
-    raw.create_index([("ts", ASCENDING)], expireAfterSeconds=config.TTL_RAW_DAYS * 86400)
-    raw.create_index([("device_id", ASCENDING), ("ts", DESCENDING)])
+    seen = set()
+    for site, colls in config.SITE_COLLECTIONS.items():
+        raw = _db[colls["raw"]]
+        raw.create_index([("ts", ASCENDING)], expireAfterSeconds=config.TTL_RAW_DAYS * 86400)
+        raw.create_index([("device_id", ASCENDING), ("ts", DESCENDING)])
 
-    one = _db[config.SERVER_DB_1MIN]
-    one.create_index([("ts", ASCENDING)], expireAfterSeconds=config.TTL_1MIN_DAYS * 86400)
-    one.create_index([("device_id", ASCENDING), ("ts", DESCENDING)], unique=False)
+        one = _db[colls["one"]]
+        one.create_index([("ts", ASCENDING)], expireAfterSeconds=config.TTL_1MIN_DAYS * 86400)
+        one.create_index([("device_id", ASCENDING), ("ts", DESCENDING)], unique=False)
 
-    hourly = _db[config.SERVER_DB_HOURLY]
-    hourly.create_index([("device_id", ASCENDING), ("ts", DESCENDING)])
-    hourly.create_index([("ts", ASCENDING)])
+        hourly = _db[colls["hourly"]]
+        hourly.create_index([("device_id", ASCENDING), ("ts", DESCENDING)])
+        hourly.create_index([("ts", ASCENDING)])
+        seen.add(site)
 
     events = _db[config.EVENTS_DB]
     events.create_index([("ts", ASCENDING)])
@@ -94,6 +101,11 @@ def is_connected():
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+def _site_colls(device_id=None, site=None):
+    site = site or config.site_for(device_id)
+    return config.SITE_COLLECTIONS.get(site) or config.SITE_COLLECTIONS["polyhouse"]
 
 
 def log_reading(device_id, device_name, metrics):
@@ -124,7 +136,7 @@ def log_reading(device_id, device_name, metrics):
 
     doc = {
         "device_id": device_id,
-        "device_name": device_name or "Breaker",
+        "device_name": config.device_name(device_id, device_name or "Breaker"),
         "ts": now,
         "v": v,
         "a": a,
@@ -144,110 +156,188 @@ def log_reading(device_id, device_name, metrics):
         "balance": prep.get("balance_kwh"),
         "charge": prep.get("charge_kwh"),
         "prepaid": prep.get("switch_prepayment"),
+        "site": config.site_for(device_id),
     }
+    coll = _site_colls(device_id)["raw"]
     try:
-        _db[config.SERVER_DB].insert_one(doc)
+        _db[coll].insert_one(doc)
         return True
     except PyMongoError as exc:
         print(f"[db] insert failed: {exc}")
         return False
 
 
+def _floor_minute(dt):
+    return dt.replace(second=0, microsecond=0)
+
+
+def _floor_hour(dt):
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+
 def run_rollups():
     if _db is None:
         return
     with _rollup_lock:
-        _rollup_minute()
-        _rollup_hour()
+        for site in config.SITE_COLLECTIONS:
+            try:
+                _rollup_minute(site)
+            except Exception as exc:
+                print(f"[db] minute rollup {site} failed: {exc}")
+            try:
+                _rollup_hour(site)
+            except Exception as exc:
+                print(f"[db] hour rollup {site} failed: {exc}")
 
 
-def _rollup_minute():
-    global _last_minute_done
-    raw = _db[config.SERVER_DB]
-    one = _db[config.SERVER_DB_1MIN]
+def _rollup_minute(site):
+    raw = _db[config.SITE_COLLECTIONS[site]["raw"]]
+    one = _db[config.SITE_COLLECTIONS[site]["one"]]
     now = _now()
-    target = datetime(now.year, now.month, now.day, now.hour, now.minute, tzinfo=timezone.utc) - timedelta(minutes=1)
-    if _last_minute_done is None or _last_minute_done < target:
-        for minute in range(0, 3):
-            mstart = target - timedelta(minutes=minute)
-            if _last_minute_done and mstart <= _last_minute_done:
-                break
-            mstart = datetime(mstart.year, mstart.month, mstart.day, mstart.hour, mstart.minute, tzinfo=timezone.utc)
-            mend = mstart + timedelta(minutes=1)
-            _aggregate_into(raw, one, mstart, mend, "minute")
-        _last_minute_done = target
+    target = _floor_minute(now) - timedelta(minutes=1)
+    last = _last_minute_done.get(site)
+    if last is not None and last >= target:
+        return
+    if last is None:
+        start = target - timedelta(minutes=2)
+    else:
+        start = last + timedelta(minutes=1)
+    start = max(start, target - timedelta(minutes=60))
+    cur = start
+    while cur <= target:
+        _aggregate_window_py(raw, one, cur, cur + timedelta(minutes=1), "minute", site)
+        cur += timedelta(minutes=1)
+    _last_minute_done[site] = target
 
 
-def _rollup_hour():
-    global _last_hour_done
-    one = _db[config.SERVER_DB_1MIN]
-    hourly = _db[config.SERVER_DB_HOURLY]
+def _rollup_hour(site):
+    one = _db[config.SITE_COLLECTIONS[site]["one"]]
+    hourly = _db[config.SITE_COLLECTIONS[site]["hourly"]]
     now = _now()
-    hstart = datetime(now.year, now.month, now.day, now.hour, tzinfo=timezone.utc) - timedelta(hours=1)
-    if _last_hour_done is None or _last_hour_done < hstart:
-        hend = hstart + timedelta(hours=1)
-        _aggregate_into(one, hourly, hstart, hend, "hour")
-        result = one.delete_many({"ts": {"$gte": hstart, "$lt": hend}})
-        _last_hour_done = hstart
+    hstart = _floor_hour(now) - timedelta(hours=1)
+    last = _last_hour_done.get(site)
+    if last is not None and last >= hstart:
+        return
+    if last is None:
+        start = hstart - timedelta(hours=6)
+    else:
+        start = last + timedelta(hours=1)
+    start = max(start, hstart - timedelta(hours=6))
+    allowed = config.site_devices(site)
+    cur = start
+    while cur <= hstart:
+        _aggregate_window_py(one, hourly, cur, cur + timedelta(hours=1), "hour", site)
+        if allowed:
+            try:
+                one.delete_many({"ts": {"$gte": cur, "$lt": cur + timedelta(hours=1)},
+                                 "device_id": {"$in": allowed}})
+            except PyMongoError as exc:
+                print(f"[db] hour clean {site} failed: {exc}")
+        cur += timedelta(hours=1)
+    _last_hour_done[site] = hstart
 
 
-def _aggregate_into(source, dest, start, end, step):
-    pipeline = [
-        {"$match": {"ts": {"$gte": start, "$lt": end}}},
-        {"$group": {
-            "_id": "$device_id",
-            "count": {"$sum": 1},
-            "v_min": {"$min": "$v"}, "v_max": {"$max": "$v"}, "v_avg": {"$avg": "$v"},
-            "a_min": {"$min": "$a"}, "a_max": {"$max": "$a"}, "a_avg": {"$avg": "$a"},
-            "w_min": {"$min": "$w"}, "w_max": {"$max": "$w"}, "w_avg": {"$avg": "$w"},
-            "kwh": {"$max": "$kwh"},
-            "temp_avg": {"$avg": "$temp"},
-            "leak_max": {"$max": "$leak"},
-            "switch": {"$last": "$switch"},
-        }},
-    ]
+def _aggregate_window_py(source, dest, start, end, step, site):
+    """Deterministic Python-side rollup for one window (no Mongo $group)."""
+    allowed = config.site_devices(site)
+    if not allowed:
+        return
+    query = {"ts": {"$gte": start, "$lt": end}, "device_id": {"$in": allowed}}
+    groups = {}
     try:
-        docs = list(source.aggregate(pipeline))
-        for d in docs:
-            dset = {
-                "ts": start,
-                "step": step,
-                "count": d["count"],
-                "v_min": d["v_min"], "v_max": d["v_max"], "v_avg": round(d["v_avg"], 2) if d["v_avg"] is not None else None,
-                "a_min": d["a_min"], "a_max": d["a_max"], "a_avg": round(d["a_avg"], 4) if d["a_avg"] is not None else None,
-                "w_min": d["w_min"], "w_max": d["w_max"], "w_avg": round(d["w_avg"], 1) if d["w_avg"] is not None else None,
-                "kwh": d["kwh"],
-                "temp_avg": round(d["temp_avg"], 1) if d["temp_avg"] is not None else None,
-                "leak_max": d["leak_max"],
-                "switch": d["switch"],
-            }
-            dest.update_one(
-                {"device_id": d["_id"], "ts": start},
-                {"$set": dset},
-                upsert=True,
-            )
+        for doc in source.find(query):
+            did = doc.get("device_id")
+            g = groups.setdefault(did, {
+                "n": 0,
+                "vsum": 0.0, "amin": None, "amax": None, "asum": 0.0,
+                "vmin": None, "vmax": None, "wsum": 0.0,
+                "wmin": None, "wmax": None, "tsum": 0.0, "lmax": None,
+                "kwh": None, "switch": None, "last_ts": None,
+            })
+            v = doc.get("v_avg") if step == "hour" else doc.get("v")
+            a = doc.get("a_avg") if step == "hour" else doc.get("a")
+            w = doc.get("w_avg") if step == "hour" else doc.get("w")
+            temp = doc.get("temp_avg") if step == "hour" else doc.get("temp")
+            leak = doc.get("leak_max") if step == "hour" else doc.get("leak")
+            g["n"] += 1
+            if v is not None:
+                g["vsum"] += v
+                g["vmin"] = v if g["vmin"] is None else min(g["vmin"], v)
+                g["vmax"] = v if g["vmax"] is None else max(g["vmax"], v)
+            if a is not None:
+                g["asum"] += a
+                g["amin"] = a if g["amin"] is None else min(g["amin"], a)
+                g["amax"] = a if g["amax"] is None else max(g["amax"], a)
+            if w is not None:
+                g["wsum"] += w
+                g["wmin"] = w if g["wmin"] is None else min(g["wmin"], w)
+                g["wmax"] = w if g["wmax"] is None else max(g["wmax"], w)
+            if temp is not None:
+                g["tsum"] += temp
+            if leak is not None:
+                g["lmax"] = leak if g["lmax"] is None else max(g["lmax"], leak)
+            kwh = doc.get("kwh")
+            if kwh is not None:
+                g["kwh"] = kwh
+            ts = doc.get("ts")
+            if g["last_ts"] is None or (ts and ts > g["last_ts"]):
+                g["last_ts"] = ts
+                g["switch"] = doc.get("switch")
     except PyMongoError as exc:
-        print(f"[db] rollup {step} failed: {exc}")
+        print(f"[db] rollup read {site} {step} failed: {exc}")
+        return
+
+    for did, g in groups.items():
+        n = g["n"] or 1
+        dset = {
+            "ts": start,
+            "step": step,
+            "site": site,
+            "count": g["n"],
+            "v_avg": round(g["vsum"] / n, 2) if g["vsum"] else None,
+            "v_min": g["vmin"], "v_max": g["vmax"],
+            "a_avg": round(g["asum"] / n, 4) if g["asum"] else None,
+            "a_min": g["amin"], "a_max": g["amax"],
+            "w_avg": round(g["wsum"] / n, 1) if g["wsum"] else None,
+            "w_min": g["wmin"], "w_max": g["wmax"],
+            "kwh": g["kwh"],
+            "temp_avg": round(g["tsum"] / n, 1) if g["tsum"] else None,
+            "leak_max": g["lmax"],
+            "switch": g["switch"],
+        }
+        try:
+            dest.update_one({"device_id": did, "ts": start}, {"$set": dset}, upsert=True)
+        except PyMongoError as exc:
+            print(f"[db] rollup write {site} {step} failed: {exc}")
+            continue
+    if groups:
+        print(f"[db] rollup {step} {site} {start:%Y-%m-%d %H:%M} <- {len(groups)} device(s)")
 
 
-def history(range_hours):
+def history(range_hours, device_id=None):
     if _db is None:
         return {"success": False, "error": "DB not connected"}
     start = _now() - timedelta(hours=range_hours)
-    return _series_query(start, _now(), range_hours)
+    return _series_query(start, _now(), range_hours, device_id=device_id)
 
 
-def history_between(from_ts, to_ts):
+def history_between(from_ts, to_ts, device_id=None):
     if _db is None or to_ts <= from_ts:
         return {"success": False, "error": "DB not connected" if _db is None else "to must be after from"}
     hours = max((to_ts - from_ts).total_seconds() / 3600.0, 0.05)
-    return _series_query(from_ts, to_ts, hours)
+    return _series_query(from_ts, to_ts, hours, device_id=device_id)
 
 
-def _series_query(start, end, range_hours):
-    coll_name = _map_range_to_collection(range_hours)
+def _series_query(start, end, range_hours, device_id=None):
+    site = config.site_for(device_id)
+    coll_name = _map_range_to_collection(range_hours, site)
+    query = {"ts": {"$gte": start, "$lte": end}}
+    if device_id:
+        query["device_id"] = device_id
+    elif site:
+        query["device_id"] = {"$in": config.site_devices(site)}
     cursor = _db[coll_name].find(
-        {"ts": {"$gte": start, "$lte": end}},
+        query,
         {"device_id": 1, "ts": 1, "v": 1, "a": 1, "w": 1, "kwh": 1, "temp": 1, "pf": 1,
          "v_avg": 1, "a_avg": 1, "w_avg": 1},
     ).sort("ts", ASCENDING)
@@ -271,18 +361,20 @@ def _series_query(start, end, range_hours):
     }
 
 
-def _map_range_to_collection(range_hours):
+def _map_range_to_collection(range_hours, site="polyhouse"):
+    colls = config.SITE_COLLECTIONS.get(site) or config.SITE_COLLECTIONS["polyhouse"]
     if range_hours <= 2:
-        return config.SERVER_DB
+        return colls["raw"]
     if range_hours <= 48:
-        return config.SERVER_DB_1MIN
-    return config.SERVER_DB_HOURLY
+        return colls["one"]
+    return colls["hourly"]
 
 
 def last_raw(device_id):
     if _db is None:
         return None
-    return _db[config.SERVER_DB].find_one({"device_id": device_id}, sort=[("ts", DESCENDING)])
+    coll = _site_colls(device_id)["raw"]
+    return _db[coll].find_one({"device_id": device_id}, sort=[("ts", DESCENDING)])
 
 
 def log_event(device_id, event_type, detail=None, ts=None):
@@ -301,12 +393,14 @@ def log_event(device_id, event_type, detail=None, ts=None):
         return False
 
 
-def query_events(from_ts, to_ts=None, limit=100000):
+def query_events(from_ts, to_ts=None, device_id=None, limit=100000):
     if _db is None:
         return []
     query = {"ts": {"$gte": from_ts}}
     if to_ts is not None:
         query["ts"]["$lte"] = to_ts
+    if device_id:
+        query["device_id"] = device_id
     try:
         return list(_db[config.EVENTS_DB].find(query).sort("ts", ASCENDING).limit(limit))
     except PyMongoError as exc:
@@ -314,12 +408,12 @@ def query_events(from_ts, to_ts=None, limit=100000):
         return []
 
 
-def event_stats(range_hours):
+def event_stats(range_hours, device_id=None):
     if _db is None:
         return {"success": False, "error": "DB not connected"}
     now = _now()
     start = now - timedelta(hours=range_hours)
-    events = query_events(start, now)
+    events = query_events(start, now, device_id=device_id)
 
     bucket_sec = 3600 if range_hours <= 24 else (6 * 3600 if range_hours <= 168 else 86400)
     buckets = {}
@@ -364,12 +458,18 @@ def event_stats(range_hours):
             "series": series, "recent": recent, "totals": totals}
 
 
-def consumption(from_ts, to_ts):
+def consumption(from_ts, to_ts, device_id=None):
     if _db is None:
         return {"devices": [], "total_kwh": 0.0}
-    coll = _db[config.SERVER_DB]
+    site = config.site_for(device_id)
+    coll = _db[config.SITE_COLLECTIONS[site]["raw"]]
+    query = {"ts": {"$gte": from_ts, "$lte": to_ts}}
+    if device_id:
+        query["device_id"] = device_id
+    else:
+        query["device_id"] = {"$in": config.site_devices(site)}
     try:
-        device_ids = coll.distinct("device_id", {"ts": {"$gte": from_ts, "$lte": to_ts}})
+        device_ids = coll.distinct("device_id", query)
     except PyMongoError as exc:
         print(f"[db] consumption distinct failed: {exc}")
         return {"devices": [], "total_kwh": 0.0}
@@ -406,10 +506,12 @@ def consumption(from_ts, to_ts):
     return {"devices": details, "total_kwh": round(total, 4)}
 
 
-def query_docs(coll_name, from_ts, to_ts, limit=500000):
+def query_docs(coll_name, from_ts, to_ts, limit=500000, device_id=None):
     if _db is None:
         return []
     query = {"ts": {"$gte": from_ts, "$lt": to_ts}}
+    if device_id:
+        query["device_id"] = device_id
     try:
         return list(_db[coll_name].find(query).sort("ts", ASCENDING).limit(limit))
     except PyMongoError as exc:
@@ -417,17 +519,17 @@ def query_docs(coll_name, from_ts, to_ts, limit=500000):
         return []
 
 
-def iter_readings(from_ts, to_ts, limit=400000):
+def iter_readings(from_ts, to_ts, device_id=None, limit=400000):
     if _db is None:
         return
+    site = config.site_for(device_id)
     range_hours = (to_ts - from_ts).total_seconds() / 3600.0
-    if range_hours <= 24:
-        coll = _db[config.SERVER_DB]
-    elif range_hours <= 720:
-        coll = _db[config.SERVER_DB_1MIN]
-    else:
-        coll = _db[config.SERVER_DB_HOURLY]
+    coll = _db[_map_range_to_collection(range_hours, site)]
     query = {"ts": {"$gte": from_ts, "$lt": to_ts}}
+    if device_id:
+        query["device_id"] = device_id
+    else:
+        query["device_id"] = {"$in": config.site_devices(site)}
     for doc in coll.find(query).sort("ts", ASCENDING).limit(limit):
         yield doc
 
@@ -437,7 +539,11 @@ def db_stats():
         return {"success": False, "connected": False, "error": "DB not connected"}
     stats = {}
     total_bytes = 0
-    for name in (config.SERVER_DB, config.SERVER_DB_1MIN, config.SERVER_DB_HOURLY):
+    names = []
+    for site, colls in config.SITE_COLLECTIONS.items():
+        for key in ("raw", "one", "hourly"):
+            names.append(colls[key])
+    for name in names:
         try:
             cs = _db.command("collStats", name)
         except PyMongoError:

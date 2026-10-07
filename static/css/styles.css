@@ -122,6 +122,35 @@ header {
 
 .logo .subtitle { font-size: 0.8rem; color: var(--text-secondary); }
 
+.page-nav { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.page-tab {
+    padding: 0.4rem 0.95rem;
+    border-radius: 20px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    text-decoration: none;
+    transition: all 0.2s;
+}
+.page-tab:hover { border-color: var(--accent-blue); color: var(--accent-blue); }
+.page-tab.active {
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+    color: #fff;
+    border-color: transparent;
+}
+
+.site-chip {
+    padding: 0.4rem 1rem;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--accent-cyan);
+    background: rgba(6, 182, 212, 0.12);
+    border: 1px solid rgba(6, 182, 212, 0.35);
+}
+
 .brand-thingmic {
     font-weight: 700;
     color: var(--accent-blue);

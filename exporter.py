@@ -80,12 +80,14 @@ def _doc_values(doc, step):
     }
 
 
-def _source_collection(interval):
+def _source_collection(interval, device_id=None):
+    site = config.site_for(device_id)
+    colls = config.SITE_COLLECTIONS.get(site) or config.SITE_COLLECTIONS["polyhouse"]
     if interval == "raw":
-        return config.SERVER_DB
+        return colls["raw"]
     if interval in ("1min", "5min", "15min"):
-        return config.SERVER_DB_1MIN
-    return config.SERVER_DB_HOURLY
+        return colls["one"]
+    return colls["hourly"]
 
 
 def _bucket(docs, window):
@@ -138,12 +140,12 @@ def _bucket(docs, window):
     return rows
 
 
-def iter_rows(from_ts, to_ts, interval):
+def iter_rows(from_ts, to_ts, interval, device_id=None):
     if interval not in WINDOW_SEC:
         raise ValueError(f"invalid interval: {interval}")
 
-    coll = _source_collection(interval)
-    docs = db.query_docs(coll, from_ts, to_ts)
+    coll = _source_collection(interval, device_id)
+    docs = db.query_docs(coll, from_ts, to_ts, device_id=device_id)
 
     if interval in ("5min", "15min"):
         rows = _bucket(docs, WINDOW_SEC[interval])
@@ -152,7 +154,7 @@ def iter_rows(from_ts, to_ts, interval):
         return
 
     for doc in docs:
-        step = doc.get("step", "raw" if coll == config.SERVER_DB else "minute")
+        step = doc.get("step") or ("raw" if interval == "raw" else "minute")
         yield _to_row(doc["ts"], doc.get("device_id", ""), _doc_values(doc, step))
 
 
@@ -165,8 +167,8 @@ def _header_and_rows(rows, fields):
     return header, out
 
 
-def build_csv(from_ts, to_ts, interval, fields):
-    header, body = _header_and_rows(iter_rows(from_ts, to_ts, interval), fields)
+def build_csv(from_ts, to_ts, interval, fields, device_id=None):
+    header, body = _header_and_rows(iter_rows(from_ts, to_ts, interval, device_id), fields)
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(header)
@@ -174,8 +176,8 @@ def build_csv(from_ts, to_ts, interval, fields):
     return buf.getvalue()
 
 
-def build_xlsx(from_ts, to_ts, interval, fields):
-    header, body = _header_and_rows(iter_rows(from_ts, to_ts, interval), fields)
+def build_xlsx(from_ts, to_ts, interval, fields, device_id=None):
+    header, body = _header_and_rows(iter_rows(from_ts, to_ts, interval, device_id), fields)
     if len(body) > MAX_EXCEL_ROWS:
         body = body[:MAX_EXCEL_ROWS]
     wb = openpyxl.Workbook()
