@@ -44,8 +44,31 @@ window.CCA = window.CCA || {};
         const devices = data.devices || [];
         const primary = pickPrimary(devices);
         const anyOnline = devices.some(d => d.online);
-        setStatus(anyOnline ? '' : 'warn', anyOnline ? 'Connected' : 'All offline');
-        $('lastUpdated').textContent = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+        const stale = !!data.stale;
+        setStatus(stale && !anyOnline ? 'warn' : anyOnline ? '' : 'warn', stale ? 'Stale data' : (anyOnline ? 'Connected' : 'All offline'));
+
+        let lastTxt = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+        if (data.polled_at) {
+            const age = Math.max(0, Math.floor(Date.now() / 1000) - data.polled_at);
+            lastTxt += ' · ' + ageText(age) + ' · ' + new Date(data.polled_at * 1000).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
+            if (stale) lastTxt += ' (STALE)';
+        }
+        $('lastUpdated').textContent = lastTxt;
+        if (stale) {
+            let strip = document.getElementById('staleStrip');
+            if (!strip) {
+                strip = document.createElement('div');
+                strip.id = 'staleStrip';
+                strip.className = 'db-badge warn';
+                strip.style.cssText = 'display:inline-flex;align-items:center;gap:6px;margin-left:auto;';
+                const meta = document.querySelector('.meta-bar');
+                if (meta) meta.appendChild(strip);
+            }
+            strip.textContent = '⚠ Tuya unresponsive — showing last known data';
+        } else {
+            const strip = document.getElementById('staleStrip');
+            if (strip) strip.remove();
+        }
 
         const pa = primary && primary.metrics.phase_a;
         let voltage = '--', current = '--', power = '--', energy = '--', temp = '--', pf = '--';
@@ -103,6 +126,14 @@ window.CCA = window.CCA || {};
         if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
         if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
         return n + ' B';
+    }
+
+    function ageText(secs) {
+        if (secs == null) return '';
+        if (secs < 60) return secs + 's old';
+        const m = Math.floor(secs / 60);
+        if (m < 60) return m + 'm ' + (secs % 60) + 's old';
+        return Math.floor(m / 60) + 'h ' + (m % 60) + 'm old';
     }
 
     async function loadDbStats() {

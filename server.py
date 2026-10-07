@@ -1,7 +1,7 @@
 """
 CCA Power Meter Dashboard - Backend Server
-Fetches real-time power data from Tuya Cloud API, logs readings to MongoDB
-and serves the dashboard.
+Fetches real-time power data via tinytuya LAN (direct device) or Tuya Cloud API,
+logs readings to MongoDB and serves the dashboard.
 """
 
 import base64
@@ -9,9 +9,11 @@ import csv
 import io
 import os
 import time
+import threading
 import hmac
 import hashlib
 import json
+import logging
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -24,6 +26,9 @@ import db
 import exporter
 import prepaid
 
+if config.USE_LAN:
+    import tinytuya
+
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 CORS(app)
 
@@ -35,6 +40,138 @@ _last_raw_cache = {}
 _last_all_status = []
 _last_ev_state = {}
 _prev_online = {}
+
+# Sustainability cache: Tuya is polled at most every config.TUYA_POLL_SEC by a
+# background thread, and browsers serve from this snapshot (no per-request hit).
+_poll_lock = threading.Lock()
+_last_polled_at = None
+
+# ---------------------------------------------------------------------------
+# tinytuya LAN mode — DPS numeric key to Tuya code mapping
+# ---------------------------------------------------------------------------
+DPS_TO_CODE = {
+    "1": "switch",
+    "6": "countdown_1",
+    "9": "fault",
+    "17": "alarm_set_1",
+    "18": "alarm_set_2",
+    "101": "phase_a",
+    "102": "phase_b",
+    "103": "phase_c",
+    "104": "total_forward_energy",
+    "105": "reverse_energy_total",
+    "106": "leakage_current",
+    "107": "temp_current",
+    "108": "balance_energy",
+    "109": "charge_energy",
+    "110": "switch_prepayment",
+}
+
+_lan_device = None
+_lan_device_ip = None
+
+
+def _discover_device_ip():
+    """Broadcast scan to find device IP on LAN."""
+    logging.info("LAN: scanning for device %s ...", config.TUYA_DEVICE_ID)
+    devices = tinytuya.deviceScan(verbose=False, maxretry=3, byID=True)
+    entry = devices.get(config.TUYA_DEVICE_ID)
+    if entry:
+        ip = entry.get("ip")
+        logging.info("LAN: discovered device at %s", ip)
+        return ip
+    logging.warning("LAN: device not found via scan")
+    return None
+
+
+def _get_lan_device():
+    """Return a persistent tinytuya device handle, creating one if needed."""
+    global _lan_device, _lan_device_ip
+    if _lan_device is not None:
+        return _lan_device
+
+    ip = config.TUYA_DEVICE_IP or _lan_device_ip
+    if not ip:
+        ip = _discover_device_ip()
+        if not ip:
+            return None
+        _lan_device_ip = ip
+
+    dev = tinytuya.Device(
+        dev_id=config.TUYA_DEVICE_ID,
+        address=ip,
+        local_key=config.TUYA_LOCAL_KEY,
+        version=float(config.TUYA_PROTOCOL_VER),
+    )
+    dev.set_socketPersistent(True)
+    _lan_device = dev
+    logging.info("LAN: connected to device at %s", ip)
+    return dev
+
+
+def _reset_lan_device():
+    """Close socket and force reconnect on next call."""
+    global _lan_device, _lan_device_ip
+    if _lan_device:
+        try:
+            _lan_device.close()
+        except Exception:
+            pass
+    _lan_device = None
+    if not config.TUYA_DEVICE_IP:
+        _lan_device_ip = None
+
+
+def _dps_to_status_list(dps):
+    """Convert tinytuya DPS dict to the status list format process_device_status expects."""
+    status_list = []
+    for dps_key, value in dps.items():
+        code = DPS_TO_CODE.get(str(dps_key))
+        if code:
+            status_list.append({"code": code, "value": value})
+    return status_list
+
+
+def _lan_get_device_status():
+    """Fetch device status via LAN. Returns (status_list, is_online, raw_dps)."""
+    dev = _get_lan_device()
+    if dev is None:
+        return [], False, {}
+
+    try:
+        data = dev.status()
+    except Exception as e:
+        logging.warning("LAN: status() failed: %s", e)
+        _reset_lan_device()
+        return [], False, {}
+
+    if not data or "dps" not in data:
+        err = data.get("Error") if isinstance(data, dict) else None
+        if err:
+            logging.warning("LAN: device error: %s", err)
+            _reset_lan_device()
+        return [], False, data if isinstance(data, dict) else {}
+
+    dps = data["dps"]
+    status_list = _dps_to_status_list(dps)
+    return status_list, True, dps
+
+
+def _device_summaries_lan():
+    """Build device summary list from LAN status (same shape as cloud version)."""
+    status_list, is_online, raw_dps = _lan_get_device_status()
+    metrics = process_device_status(status_list) if status_list else {}
+    return [{
+        "id": config.TUYA_DEVICE_ID,
+        "name": config.TUYA_DEVICE_NAME,
+        "product_name": "单相彩屏",
+        "online": is_online,
+        "category": "dlq",
+        "model": "",
+        "raw_status": status_list,
+        "metrics": metrics,
+        "_raw_dps": raw_dps,
+    }]
 
 
 def _make_signed_request(method, path, token=None, timeout=API_TIMEOUT):
@@ -221,6 +358,68 @@ def _device_summaries(devices):
     return results
 
 
+def _cache_fresh(max_age=None):
+    if _last_polled_at is None:
+        return False
+    age = time.time() - _last_polled_at
+    return age < (max_age if max_age is not None else config.TUYA_POLL_SEC)
+
+
+def _fetch_and_store():
+    """Hit Tuya once, update the shared snapshot + persistence. Raises on failure."""
+    if config.USE_LAN:
+        results = _device_summaries_lan()
+    else:
+        devices_data = tuya_get("/v2.0/cloud/thing/device?page_no=1&page_size=20")
+        if not devices_data.get("success"):
+            raise Exception(devices_data.get("msg", "Unknown Tuya error"))
+        results = _device_summaries(devices_data.get("result", []))
+
+    now = int(time.time())
+    for dev in results:
+        dev["fetched_at"] = now
+        dev["fetched_at_ist"] = datetime.fromtimestamp(now, tz=IST).strftime("%Y-%m-%d %H:%M:%S")
+
+    global _last_all_status, _last_polled_at
+    _last_all_status = results
+    _last_polled_at = now
+
+    for dev in results:
+        _maybe_log_events(dev)
+        if dev["online"]:
+            db.log_reading(dev["id"], dev["name"], dev["metrics"])
+    db.run_rollups()
+    logging.info("Tuya poll OK: %d device(s) at %s", len(results),
+                 datetime.fromtimestamp(now, tz=IST).strftime("%H:%M:%S"))
+
+
+def _refresh_now():
+    """Refresh the snapshot if it is stale. Serialized so concurrent requests
+    run at most one Tuya fetch. Never raises: on failure keeps last snapshot."""
+    try:
+        if _poll_lock.acquire(blocking=False):
+            try:
+                if not _cache_fresh():
+                    _fetch_and_store()
+            finally:
+                _poll_lock.release()
+    except Exception as e:
+        logging.warning("Tuya refresh failed: %s", e)
+    return _last_all_status
+
+
+def _poll_loop():
+    """Background thread: keep the snapshot fresh while the server is up."""
+    while True:
+        try:
+            with _poll_lock:
+                if not _cache_fresh():
+                    _fetch_and_store()
+        except Exception as e:
+            logging.warning("background Tuya poll error: %s", e)
+        time.sleep(config.TUYA_POLL_SEC)
+
+
 @app.route("/")
 def index():
     resp = send_from_directory(app.static_folder, "index.html")
@@ -230,49 +429,52 @@ def index():
 
 @app.route("/api/devices")
 def get_devices():
-    try:
-        data = tuya_get("/v2.0/cloud/thing/device?page_no=1&page_size=20")
-        if data.get("success"):
-            return jsonify({"success": True, "devices": data.get("result", [])})
-        return jsonify({"success": False, "error": data.get("msg", "Unknown error")})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+    if not _cache_fresh():
+        _refresh_now()
+    devices = [{
+        "id": d["id"],
+        "name": d["name"],
+        "product_name": d.get("product_name", ""),
+        "category": d.get("category", ""),
+        "online": d.get("online", False),
+        "fetched_at": d.get("fetched_at"),
+    } for d in _last_all_status]
+    return jsonify({"success": True, "devices": devices})
 
 
 @app.route("/api/device/<device_id>/status")
 def get_device_status(device_id):
-    try:
-        data = tuya_get(f"/v1.0/devices/{device_id}/status")
-        if data.get("success"):
-            raw_status = data["result"]
-            metrics = process_device_status(raw_status)
-            return jsonify({"success": True, "raw": raw_status, "metrics": metrics})
-        return jsonify({"success": False, "error": data.get("msg", "Unknown error")})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+    if not _cache_fresh():
+        _refresh_now()
+    for dev in _last_all_status:
+        if dev["id"] == device_id:
+            return jsonify({
+                "success": True,
+                "id": dev["id"],
+                "name": dev["name"],
+                "online": dev.get("online", False),
+                "raw": dev["raw_status"],
+                "metrics": dev["metrics"],
+                "fetched_at": dev.get("fetched_at"),
+            })
+    return jsonify({"success": False, "error": "device not found in cache"})
 
 
 @app.route("/api/all-status")
 def get_all_status():
+    error = None
     try:
-        devices_data = tuya_get("/v2.0/cloud/thing/device?page_no=1&page_size=20")
-        if not devices_data.get("success"):
-            return jsonify({"success": False, "error": devices_data.get("msg", "Unknown error")})
-
-        devices = devices_data.get("result", [])
-        results = _device_summaries(devices)
-        global _last_all_status
-        _last_all_status = results
-
-        for dev in results:
-            _maybe_log_events(dev)
-            if dev["online"]:
-                db.log_reading(dev["id"], dev["name"], dev["metrics"])
-        db.run_rollups()
-
-        return jsonify({"success": True, "devices": results})
+        if not _cache_fresh():
+            _refresh_now()
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+        error = str(e)
+    return jsonify({
+        "success": True,
+        "error": error,
+        "devices": _last_all_status,
+        "polled_at": _last_polled_at,
+        "stale": not _cache_fresh(),
+    })
 
 
 @app.route("/api/history")
@@ -497,19 +699,45 @@ def raw_dump():
     return jsonify({"success": True, "devices": summary})
 
 
+@app.route("/api/dps-raw")
+def dps_raw():
+    """Debug endpoint: show raw DPS dict from tinytuya (LAN mode only)."""
+    if not config.USE_LAN:
+        return jsonify({"success": False, "error": "LAN mode not enabled"})
+    status_list, is_online, raw_dps = _lan_get_device_status()
+    return jsonify({
+        "success": True,
+        "online": is_online,
+        "raw_dps": raw_dps,
+        "mapped_status": status_list,
+    })
+
+
 if __name__ == "__main__":
-    if not config.TUYA_ACCESS_ID or not config.TUYA_ACCESS_SECRET:
-        print("\n" + "=" * 60)
-        print("ERROR: Tuya API credentials not configured!")
-        print("1. Copy .env.example to .env")
-        print("2. Fill in TUYA_ACCESS_ID and TUYA_ACCESS_SECRET")
-        print("   (See SETUP_GUIDE.md for instructions)")
-        print("=" * 60 + "\n")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    if config.USE_LAN:
+        print(f"\nStarting CCA Power Meter Dashboard (LAN mode)")
+        print(f"  Device: {config.TUYA_DEVICE_ID}")
+        print(f"  Name:   {config.TUYA_DEVICE_NAME}")
+        ip = config.TUYA_DEVICE_IP or "auto-discover"
+        print(f"  IP:     {ip}")
+    elif config.TUYA_ACCESS_ID and config.TUYA_ACCESS_SECRET:
+        print(f"\nStarting CCA Power Meter Dashboard (Cloud mode)")
+        print(f"  API Endpoint: {config.TUYA_API_ENDPOINT}")
     else:
-        print(f"Starting CCA Power Meter Dashboard...")
-        print(f"API Endpoint: {config.TUYA_API_ENDPOINT}")
-        if db.connect():
-            print(f"MongoDB connected: {config.MONGODB_DB}")
-        else:
-            print("MongoDB not connected - running without persistence")
+        print("\n" + "=" * 60)
+        print("ERROR: No Tuya credentials configured!")
+        print("Option 1 (LAN): Set TUYA_DEVICE_ID and TUYA_LOCAL_KEY in .env")
+        print("Option 2 (Cloud): Set TUYA_ACCESS_ID and TUYA_ACCESS_SECRET in .env")
+        print("=" * 60 + "\n")
+
+    if db.connect():
+        print(f"  MongoDB connected: {config.MONGODB_DB}")
+    else:
+        print("  MongoDB not connected - running without persistence")
+
+    threading.Thread(target=_poll_loop, name="tuya-poller", daemon=True).start()
+    _refresh_now()
+
     app.run(debug=config.FLASK_DEBUG, host=config.HOST, port=config.PORT)

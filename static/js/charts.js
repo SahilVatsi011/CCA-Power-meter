@@ -6,6 +6,7 @@ window.CCA = window.CCA || {};
     let vcChart = null;
     let eventChart = null;
     let mode = '1h';
+    let currentRange = '1h';
 
     const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || null;
     const gridStyle = { color: cssVar('--chart-grid') || 'rgba(51, 65, 85, 0.5)' };
@@ -210,6 +211,7 @@ window.CCA = window.CCA || {};
     async function loadHistory(range) {
         if (!powerChart || !vcChart) return;
         mode = range;
+        currentRange = range;
         let resp;
         try {
             resp = await fetch('/api/history?range=' + encodeURIComponent(range));
@@ -224,6 +226,7 @@ window.CCA = window.CCA || {};
     async function loadCustomRange(fromSec, toSec) {
         if (!powerChart || !vcChart) return;
         mode = 'custom';
+        currentRange = null;
         let resp;
         try {
             resp = await fetch(`/api/history?from=${fromSec}&to=${toSec}`);
@@ -239,8 +242,15 @@ window.CCA = window.CCA || {};
 
     function setLive() {
         mode = 'live';
+        currentRange = null;
         resetLiveCharts();
     }
+
+    setInterval(() => {
+        if (mode && mode !== 'live' && mode !== 'custom' && CCA.loadHistory) {
+            CCA.loadHistory(mode);
+        }
+    }, 60000);
 
     function resetLiveCharts() {
         if (powerChart) { powerChart.data.labels = []; powerChart.data.datasets[0].data = []; powerChart.update('none'); }
