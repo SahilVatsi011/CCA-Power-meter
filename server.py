@@ -437,6 +437,13 @@ def hydro():
     return resp
 
 
+@app.route("/p1")
+def p1():
+    resp = send_from_directory(app.static_folder, "p1.html")
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
 @app.route("/api/devices")
 def get_devices():
     if not _cache_fresh():

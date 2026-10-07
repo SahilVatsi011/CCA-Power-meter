@@ -63,6 +63,7 @@ def connect():
             _db = _client[config.MONGODB_DB]
             _client.admin.command("ping")
             _ensure_indexes()
+            migrate_strays()
             _connected = True
             return True
         except PyMongoError as exc:
@@ -70,6 +71,38 @@ def connect():
             _db = None
             print(f"[db] Mongo connect failed: {exc}")
             return False
+
+
+_last_stray_migrated = False
+
+
+def migrate_strays():
+    """Copy any reading that landed in the original 'readings' collection for a
+    non-polyhouse device into its dedicated site collection. Idempotent (uses
+    $setOnInsert), never deletes anything."""
+    global _last_stray_migrated
+    if _db is None or _last_stray_migrated:
+        return
+    for site, colls in config.SITE_COLLECTIONS.items():
+        if colls["raw"] == config.SERVER_DB:
+            continue
+        dest = _db[colls["raw"]]
+        for device_id in config.site_devices(site):
+            try:
+                copied = 0
+                for doc in _db[config.SERVER_DB].find({"device_id": device_id}):
+                    d = {k: v for k, v in doc.items() if k != "_id"}
+                    dest.update_one(
+                        {"device_id": device_id, "ts": doc.get("ts")},
+                        {"$setOnInsert": d},
+                        upsert=True,
+                    )
+                    copied += 1
+                if copied:
+                    print(f"[db] migrated {copied} stray reading(s) -> {colls['raw']} ({device_id})")
+            except PyMongoError as exc:
+                print(f"[db] stray migrate {site} failed: {exc}")
+    _last_stray_migrated = True
 
 
 def _ensure_indexes():

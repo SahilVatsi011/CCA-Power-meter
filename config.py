@@ -36,6 +36,7 @@ CONNECT_TIMEOUT_MS = int(os.getenv("MONGO_CONNECT_TIMEOUT_MS", "8000"))
 DEVICES = {
     "d780624b94e6541fde0u16": {"name": "Polyhouse 2", "site": "polyhouse"},
     "d716467e4cec0ba95deibf": {"name": "Hydroponics Lab", "site": "hydroponics"},
+    "d7cfea8b0a84ad9c65znby": {"name": "Polyhouse 1", "site": "polyhouse1"},
 }
 
 SITE_COLLECTIONS = {
@@ -48,6 +49,11 @@ SITE_COLLECTIONS = {
         "raw": os.getenv("MONGO_DB_RAW_HYDRO", "readings_hydro"),
         "one": os.getenv("MONGO_DB_1MIN_HYDRO", "readings_hydro_1min"),
         "hourly": os.getenv("MONGO_DB_HOURLY_HYDRO", "readings_hydro_hourly"),
+    },
+    "polyhouse1": {
+        "raw": os.getenv("MONGO_DB_RAW_P1", "readings_p1"),
+        "one": os.getenv("MONGO_DB_1MIN_P1", "readings_p1_1min"),
+        "hourly": os.getenv("MONGO_DB_HOURLY_P1", "readings_p1_hourly"),
     },
 }
 
