@@ -193,19 +193,55 @@ def run_rollups():
 def _rollup_minute(site):
     raw = _db[config.SITE_COLLECTIONS[site]["raw"]]
     one = _db[config.SITE_COLLECTIONS[site]["one"]]
+    allowed = config.site_devices(site)
+    if not allowed:
+        return
     now = _now()
     target = _floor_minute(now) - timedelta(minutes=1)
+
     last = _last_minute_done.get(site)
-    if last is not None and last >= target:
-        return
-    if last is None:
-        start = target - timedelta(minutes=2)
-    else:
+    if last is not None:
+        if last >= target:
+            return
         start = last + timedelta(minutes=1)
-    start = max(start, target - timedelta(minutes=60))
+    else:
+        start = None
+        doc = one.find_one({"device_id": {"$in": allowed}}, sort=[("ts", DESCENDING)])
+        if doc is not None:
+            start = _floor_minute(doc["ts"]) + timedelta(minutes=1)
+        else:
+            rdoc = raw.find_one({"device_id": {"$in": allowed}}, sort=[("ts", ASCENDING)])
+            if rdoc is not None:
+                start = _floor_minute(rdoc["ts"])
+        if start is None:
+            _last_minute_done[site] = target
+            return
+        if start > target:
+            return
+
+    clamp = target - timedelta(days=30)
+    if start < clamp:
+        start = clamp
+    if start > target:
+        start = target
+
+    try:
+        cursor = raw.find({"ts": {"$gte": start, "$lt": target + timedelta(minutes=1)},
+                           "device_id": {"$in": allowed}})
+        buckets = {}
+        for doc in cursor:
+            m = _floor_minute(doc["ts"])
+            if m < start or m > target:
+                continue
+            buckets.setdefault(m, []).append(doc)
+    except PyMongoError as exc:
+        print(f"[db] minute backfill read {site} failed: {exc}")
+        return
+
     cur = start
     while cur <= target:
-        _aggregate_window_py(raw, one, cur, cur + timedelta(minutes=1), "minute", site)
+        _aggregate_window_py(raw, one, cur, cur + timedelta(minutes=1), "minute", site,
+                             docs=buckets.get(cur))
         cur += timedelta(minutes=1)
     _last_minute_done[site] = target
 
@@ -213,31 +249,48 @@ def _rollup_minute(site):
 def _rollup_hour(site):
     one = _db[config.SITE_COLLECTIONS[site]["one"]]
     hourly = _db[config.SITE_COLLECTIONS[site]["hourly"]]
-    now = _now()
-    hstart = _floor_hour(now) - timedelta(hours=1)
-    last = _last_hour_done.get(site)
-    if last is not None and last >= hstart:
-        return
-    if last is None:
-        start = hstart - timedelta(hours=6)
-    else:
-        start = last + timedelta(hours=1)
-    start = max(start, hstart - timedelta(hours=6))
     allowed = config.site_devices(site)
+    if not allowed:
+        return
+    now = _now()
+    target = _floor_hour(now) - timedelta(hours=1)
+
+    last = _last_hour_done.get(site)
+    if last is not None:
+        if last >= target:
+            return
+        start = last + timedelta(hours=1)
+    else:
+        start = None
+        hdoc = hourly.find_one({"device_id": {"$in": allowed}}, sort=[("ts", DESCENDING)])
+        if hdoc is not None:
+            start = _floor_hour(hdoc["ts"]) + timedelta(hours=1)
+        mdoc = one.find_one({"device_id": {"$in": allowed}}, sort=[("ts", ASCENDING)])
+        if mdoc is not None:
+            mstart = _floor_hour(mdoc["ts"])
+            if start is None:
+                start = mstart
+            elif mstart > start:
+                start = mstart
+        if start is None:
+            _last_hour_done[site] = target
+            return
+
+    clamp = target - timedelta(days=30)
+    if start < clamp:
+        start = clamp
+    if start > target:
+        _last_hour_done[site] = target
+        return
+
     cur = start
-    while cur <= hstart:
+    while cur <= target:
         _aggregate_window_py(one, hourly, cur, cur + timedelta(hours=1), "hour", site)
-        if allowed:
-            try:
-                one.delete_many({"ts": {"$gte": cur, "$lt": cur + timedelta(hours=1)},
-                                 "device_id": {"$in": allowed}})
-            except PyMongoError as exc:
-                print(f"[db] hour clean {site} failed: {exc}")
         cur += timedelta(hours=1)
-    _last_hour_done[site] = hstart
+    _last_hour_done[site] = target
 
 
-def _aggregate_window_py(source, dest, start, end, step, site):
+def _aggregate_window_py(source, dest, start, end, step, site, docs=None):
     """Deterministic Python-side rollup for one window (no Mongo $group)."""
     allowed = config.site_devices(site)
     if not allowed:
@@ -245,7 +298,8 @@ def _aggregate_window_py(source, dest, start, end, step, site):
     query = {"ts": {"$gte": start, "$lt": end}, "device_id": {"$in": allowed}}
     groups = {}
     try:
-        for doc in source.find(query):
+        iterator = docs if docs is not None else source.find(query)
+        for doc in iterator:
             did = doc.get("device_id")
             g = groups.setdefault(did, {
                 "n": 0,
