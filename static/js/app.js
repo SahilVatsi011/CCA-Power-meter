@@ -6,6 +6,11 @@ window.CCA = window.CCA || {};
 
     const PAGE_DEVICE = window.PAGE_DEVICE_ID || null;
     const devQS = () => (PAGE_DEVICE ? 'device=' + encodeURIComponent(PAGE_DEVICE) : '');
+    const LOG_COLS = window.PAGE_LOG_COLS || ['v', 'a', 'w', 'kwh', 'temp', 'pf'];
+
+    const setHTML = (id, html) => { const el = $(id); if (el) el.innerHTML = html; };
+    const setTextId = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
+    const hideCardOf = (id) => { const el = $(id); if (!el) return; const c = el.closest('.summary-card'); if (c) c.style.display = 'none'; };
 
     function addSiteChip() {
         if (!window.PAGE_TITLE) return;
@@ -22,13 +27,15 @@ window.CCA = window.CCA || {};
         $('statusText').textContent = text;
     }
 
-    function addLogRow(voltage, current, power, energy, temp, pf) {
+    function addLogRow(vals) {
         const tbody = $('logBody');
+        if (!tbody) return;
         const placeholder = tbody.querySelector('td[colspan]');
         if (placeholder) placeholder.parentElement.remove();
         const time = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
         const row = document.createElement('tr');
-        row.innerHTML = `<td>${time}</td><td>${voltage}</td><td>${current}</td><td>${power}</td><td>${energy}</td><td>${temp}</td><td>${pf}</td>`;
+        row.innerHTML = `<td>${time}</td>` +
+            LOG_COLS.map(c => `<td>${vals[c] == null ? '--' : vals[c]}</td>`).join('');
         tbody.insertBefore(row, tbody.firstChild);
         while (tbody.children.length > 10) tbody.removeChild(tbody.lastChild);
     }
@@ -84,54 +91,70 @@ window.CCA = window.CCA || {};
 
         const pa = primary && primary.metrics.phase_a;
         let voltage = '--', current = '--', power = '--', energy = '--', temp = '--', pf = '--';
-        if (pa) {
+        const hasPhase = !!(pa && pa.voltage != null && pa.current != null);
+
+        if (pa && pa.power != null) {
+            power = pa.power;
+            setHTML('sumPower', `${power}<span class="unit">W</span>`);
+        }
+        if (hasPhase) {
             voltage = pa.voltage;
             current = pa.current;
-            power = pa.power;
-            pf = (voltage * current > 0 && power) ? (power / (voltage * current)).toFixed(2) : '--';
-            $('sumPower').innerHTML = `${power}<span class="unit">W</span>`;
-            $('sumVoltage').innerHTML = `${voltage}<span class="unit">V</span>`;
-            $('sumCurrent').innerHTML = `${current}<span class="unit">A</span>`;
+            pf = (voltage * current > 0 && power !== '--' && power) ? (power / (voltage * current)).toFixed(2) : '--';
+            setHTML('sumVoltage', `${voltage}<span class="unit">V</span>`);
+            setHTML('sumCurrent', `${current}<span class="unit">A</span>`);
+            setHTML('sumPF', pf === '--' ? '--' : `${pf}<span class="unit"></span>`);
+            setTextId('sumVoltageSub', 'Phase A');
+            setTextId('sumCurrentSub', 'Phase A');
+        } else {
+            hideCardOf('sumVoltage');
+            hideCardOf('sumCurrent');
+            hideCardOf('sumPF');
         }
-        $('sumPF').innerHTML = pf === '--' ? '--' : `${pf}<span class="unit">${voltage && current ? '' : ''}</span>`;
 
         const m = primary ? primary.metrics : {};
-        if (m.total_energy) {
+        if (m.total_energy && m.total_energy.value != null) {
             energy = m.total_energy.value;
-            $('sumEnergy').innerHTML = `${energy}<span class="unit">kWh</span>`;
+            setHTML('sumEnergy', `${energy}<span class="unit">kWh</span>`);
         }
-        if (m.temperature) {
+        if (m.temperature && m.temperature.value != null) {
             temp = m.temperature.value;
-            $('sumTemp').innerHTML = `${temp}<span class="unit">°C</span>`;
+            setHTML('sumTemp', `${temp}<span class="unit">°C</span>`);
+        } else {
+            hideCardOf('sumTemp');
+        }
+        if (m.supply_frequency) {
+            const f = typeof m.supply_frequency === 'object' ? m.supply_frequency.value : m.supply_frequency;
+            if (f != null) setHTML('sumFreq', `${f}<span class="unit">Hz</span>`);
+        } else {
+            hideCardOf('sumFreq');
         }
         if (m.fault) {
             const active = m.fault.active || [];
-            $('sumFault').textContent = active.length ? active.join(', ') : (m.fault.value ? 'Fault ' + m.fault.value : 'No faults');
-            $('sumFault').style.color = (active.length || m.fault.value) ? 'var(--accent-red)' : 'var(--text-secondary)';
+            const faultTxt = active.length ? active.join(', ') : (m.fault.value ? 'Fault ' + m.fault.value : 'No faults');
+            setTextId('sumFault', faultTxt);
+            const fEl = $('sumFault');
+            if (fEl) fEl.style.color = (active.length || m.fault.value) ? 'var(--accent-red)' : 'var(--text-secondary)';
         }
+        setTextId('sumDevStatus', primary ? (primary.online ? 'Online' : 'Offline') : (anyOnline ? 'Online' : 'Offline'));
 
         if (CCA.appendLive) CCA.appendLive(voltage, current, power);
 
-        if (pa) {
-            $('sumVoltageSub').textContent = 'Phase A';
-            $('sumCurrentSub').textContent = 'Phase A';
-        }
-
         const sw = primary ? primary.metrics.switch : null;
         const sb = $('switchBadge');
-        if (sw && sw.value != null) {
+        if (sw && sw.value != null && sb) {
             const on = !!sw.value;
             sb.hidden = false;
             sb.className = 'switch-badge ' + (on ? 'on' : 'off');
-            $('switchText').textContent = on ? 'Switch: ON' : 'Switch: OFF';
-        } else {
+            setTextId('switchText', on ? 'Switch: ON' : 'Switch: OFF');
+        } else if (sb) {
             sb.hidden = true;
         }
 
         CCA.renderPrepaid(primary);
         CCA.renderAlarms(primary);
 
-        addLogRow(voltage, current, power, energy, temp, pf);
+        addLogRow({ v: voltage, a: current, w: power, kwh: energy, temp: temp, pf: pf });
     }
 
     function fmtBytes(n) {
@@ -214,6 +237,7 @@ window.CCA = window.CCA || {};
 
     function initExport() {
         const modal = $('exportModal');
+        if (!modal || !$('openExportBtn')) return;
         $('openExportBtn').addEventListener('click', () => {
             const to = new Date();
             const from = new Date(to.getTime() - 86400000);
@@ -294,6 +318,7 @@ window.CCA = window.CCA || {};
 
     function initCustomRange() {
         const bar = $('customRangeBar');
+        if (!bar || !$('openCustomBtn')) return;
         $('openCustomBtn').addEventListener('click', () => {
             const to = new Date();
             const from = new Date(to.getTime() - 86400000);
@@ -316,6 +341,7 @@ window.CCA = window.CCA || {};
     }
 
     function initEvents() {
+        if (!$('exportEventsBtn')) return;
         document.querySelectorAll('.ev-window').forEach(btn => {
             btn.addEventListener('click', () => {
                 document.querySelectorAll('.ev-window').forEach(b => b.classList.remove('active'));
@@ -415,6 +441,7 @@ window.CCA = window.CCA || {};
     }
 
     function initConsumption() {
+        if (!$('calcBtn') || !$('consUnits')) return;
         const unitFmt = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 3 });
         const moneyFmt = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         const whenFmt = new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });

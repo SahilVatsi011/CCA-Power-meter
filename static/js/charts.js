@@ -46,7 +46,8 @@ window.CCA = window.CCA || {};
             plugins: { legend: { labels: { color: legendColor } } },
         };
 
-        powerChart = new Chart(document.getElementById('powerChart'), {
+        const powerEl = document.getElementById('powerChart');
+        if (powerEl) powerChart = new Chart(powerEl, {
             type: 'line',
             data: {
                 labels: [],
@@ -70,7 +71,8 @@ window.CCA = window.CCA || {};
             }
         });
 
-        vcChart = new Chart(document.getElementById('vcChart'), {
+        const vcEl = document.getElementById('vcChart');
+        if (vcEl) vcChart = new Chart(vcEl, {
             type: 'line',
             data: {
                 labels: [],
@@ -89,7 +91,8 @@ window.CCA = window.CCA || {};
             }
         });
 
-        eventChart = new Chart(document.getElementById('eventChart'), {
+        const eventEl = document.getElementById('eventChart');
+        if (eventEl) eventChart = new Chart(eventEl, {
             type: 'bar',
             data: {
                 labels: [],
@@ -166,25 +169,28 @@ window.CCA = window.CCA || {};
     }
 
     function appendLive(voltage, current, power) {
-        if (mode !== 'live' || !powerChart || !vcChart) return;
+        if (mode !== 'live') return;
         const label = timeFmt.format(new Date());
-        powerChart.data.labels.push(label);
-        powerChart.data.datasets[0].data.push(power);
-        if (powerChart.data.labels.length > MAX_LIVE) {
-            powerChart.data.labels.shift();
-            powerChart.data.datasets[0].data.shift();
+        if (powerChart) {
+            powerChart.data.labels.push(label);
+            powerChart.data.datasets[0].data.push(power);
+            if (powerChart.data.labels.length > MAX_LIVE) {
+                powerChart.data.labels.shift();
+                powerChart.data.datasets[0].data.shift();
+            }
+            powerChart.update('none');
         }
-        powerChart.update('none');
-
-        vcChart.data.labels.push(label);
-        vcChart.data.datasets[0].data.push(voltage);
-        vcChart.data.datasets[1].data.push(current);
-        if (vcChart.data.labels.length > MAX_LIVE) {
-            vcChart.data.labels.shift();
-            vcChart.data.datasets[0].data.shift();
-            vcChart.data.datasets[1].data.shift();
+        if (vcChart) {
+            vcChart.data.labels.push(label);
+            vcChart.data.datasets[0].data.push(voltage);
+            vcChart.data.datasets[1].data.push(current);
+            if (vcChart.data.labels.length > MAX_LIVE) {
+                vcChart.data.labels.shift();
+                vcChart.data.datasets[0].data.shift();
+                vcChart.data.datasets[1].data.shift();
+            }
+            vcChart.update('none');
         }
-        vcChart.update('none');
     }
 
     function applySeries(data, rangeKey) {
@@ -201,18 +207,22 @@ window.CCA = window.CCA || {};
                 w.push(s.w[i]);
             });
         }
-        powerChart.data.labels = labels;
-        powerChart.data.datasets[0].data = w;
-        powerChart.update('none');
-        vcChart.data.labels = labels;
-        vcChart.data.datasets[0].data = v;
-        vcChart.data.datasets[1].data = a;
-        vcChart.update('none');
+        if (powerChart) {
+            powerChart.data.labels = labels;
+            powerChart.data.datasets[0].data = w;
+            powerChart.update('none');
+        }
+        if (vcChart) {
+            vcChart.data.labels = labels;
+            vcChart.data.datasets[0].data = v;
+            vcChart.data.datasets[1].data = a;
+            vcChart.update('none');
+        }
         CCA.historyDeviceId = did;
     }
 
     async function loadHistory(range) {
-        if (!powerChart || !vcChart) return;
+        if (!powerChart) return;
         mode = range;
         currentRange = range;
         let resp;
@@ -227,7 +237,7 @@ window.CCA = window.CCA || {};
     }
 
     async function loadCustomRange(fromSec, toSec) {
-        if (!powerChart || !vcChart) return;
+        if (!powerChart) return;
         mode = 'custom';
         currentRange = null;
         let resp;

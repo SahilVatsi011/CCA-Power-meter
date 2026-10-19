@@ -273,6 +273,20 @@ def process_device_status(status_list):
     if isinstance(fe, (int, float)):
         metrics["total_energy"] = {"value": round(fe / 100, 2), "unit": "kWh"}
 
+    # Simpler meters (e.g. KWS-306WF) report energy/power under these codes
+    # instead of the colour-LCD "phase_a" blob.
+    fwd = raw_map.get("forward_energy_total")
+    if "total_energy" not in metrics and isinstance(fwd, (int, float)):
+        metrics["total_energy"] = {"value": round(fwd / 100, 2), "unit": "kWh"}
+
+    ptotal = raw_map.get("power_total")
+    if "phase_a" not in metrics and isinstance(ptotal, (int, float)):
+        metrics["phase_a"] = {"voltage": None, "current": None, "power": ptotal}
+
+    freq = raw_map.get("supply_frequency")
+    if isinstance(freq, (int, float)):
+        metrics["supply_frequency"] = {"value": freq, "unit": "Hz"}
+
     re = raw_map.get("reverse_energy_total")
     if isinstance(re, (int, float)):
         metrics["reverse_energy"] = {"value": round(re / 100, 2), "unit": "kWh"}
@@ -444,6 +458,13 @@ def p1():
     return resp
 
 
+@app.route("/hydro-ab")
+def hydro_ab():
+    resp = send_from_directory(app.static_folder, "hydro_ab.html")
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
 @app.route("/api/devices")
 def get_devices():
     if not _cache_fresh():
@@ -525,6 +546,8 @@ def get_history():
 def _row_for(doc):
     step = doc.get("step")
     ts = doc["ts"]
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
     local = ts.astimezone(IST).replace(tzinfo=None)
     local_str = local.strftime("%Y-%m-%d %H:%M:%S")
     if step == "minute":

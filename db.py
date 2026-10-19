@@ -208,6 +208,14 @@ def _floor_hour(dt):
     return dt.replace(minute=0, second=0, microsecond=0)
 
 
+def _aware(dt):
+    """pymongo returns naive datetimes (UTC) by default; comparisons against
+    our aware `now()` raise TypeError. Coerce naive -> UTC-aware."""
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def run_rollups():
     if _db is None:
         return
@@ -234,18 +242,18 @@ def _rollup_minute(site):
 
     last = _last_minute_done.get(site)
     if last is not None:
-        if last >= target:
+        if _aware(last) >= target:
             return
-        start = last + timedelta(minutes=1)
+        start = _aware(last) + timedelta(minutes=1)
     else:
         start = None
         doc = one.find_one({"device_id": {"$in": allowed}}, sort=[("ts", DESCENDING)])
         if doc is not None:
-            start = _floor_minute(doc["ts"]) + timedelta(minutes=1)
+            start = _floor_minute(_aware(doc["ts"])) + timedelta(minutes=1)
         else:
             rdoc = raw.find_one({"device_id": {"$in": allowed}}, sort=[("ts", ASCENDING)])
             if rdoc is not None:
-                start = _floor_minute(rdoc["ts"])
+                start = _floor_minute(_aware(rdoc["ts"]))
         if start is None:
             _last_minute_done[site] = target
             return
@@ -263,7 +271,7 @@ def _rollup_minute(site):
                            "device_id": {"$in": allowed}})
         buckets = {}
         for doc in cursor:
-            m = _floor_minute(doc["ts"])
+            m = _floor_minute(_aware(doc["ts"]))
             if m < start or m > target:
                 continue
             buckets.setdefault(m, []).append(doc)
@@ -274,7 +282,7 @@ def _rollup_minute(site):
     cur = start
     while cur <= target:
         _aggregate_window_py(raw, one, cur, cur + timedelta(minutes=1), "minute", site,
-                             docs=buckets.get(cur))
+                             docs=buckets.get(cur) or [])
         cur += timedelta(minutes=1)
     _last_minute_done[site] = target
 
@@ -290,17 +298,17 @@ def _rollup_hour(site):
 
     last = _last_hour_done.get(site)
     if last is not None:
-        if last >= target:
+        if _aware(last) >= target:
             return
-        start = last + timedelta(hours=1)
+        start = _aware(last) + timedelta(hours=1)
     else:
         start = None
         hdoc = hourly.find_one({"device_id": {"$in": allowed}}, sort=[("ts", DESCENDING)])
         if hdoc is not None:
-            start = _floor_hour(hdoc["ts"]) + timedelta(hours=1)
+            start = _floor_hour(_aware(hdoc["ts"])) + timedelta(hours=1)
         mdoc = one.find_one({"device_id": {"$in": allowed}}, sort=[("ts", ASCENDING)])
         if mdoc is not None:
-            mstart = _floor_hour(mdoc["ts"])
+            mstart = _floor_hour(_aware(mdoc["ts"]))
             if start is None:
                 start = mstart
             elif mstart > start:
@@ -366,7 +374,7 @@ def _aggregate_window_py(source, dest, start, end, step, site, docs=None):
             kwh = doc.get("kwh")
             if kwh is not None:
                 g["kwh"] = kwh
-            ts = doc.get("ts")
+            ts = _aware(doc.get("ts"))
             if g["last_ts"] is None or (ts and ts > g["last_ts"]):
                 g["last_ts"] = ts
                 g["switch"] = doc.get("switch")
@@ -432,7 +440,7 @@ def _series_query(start, end, range_hours, device_id=None):
     for doc in cursor:
         did = doc.get("device_id", "unknown")
         series = devices.setdefault(did, {"labels": [], "v": [], "a": [], "w": [], "kwh": [], "temp": [], "pf": []})
-        ms = int(doc["ts"].timestamp() * 1000)
+        ms = int(_aware(doc["ts"]).timestamp() * 1000)
         series["labels"].append(ms)
         series["v"].append(doc.get("v") if doc.get("v") is not None else doc.get("v_avg"))
         series["a"].append(doc.get("a") if doc.get("a") is not None else doc.get("a_avg"))

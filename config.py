@@ -37,6 +37,7 @@ DEVICES = {
     "d780624b94e6541fde0u16": {"name": "Polyhouse 2", "site": "polyhouse"},
     "d716467e4cec0ba95deibf": {"name": "Hydroponics Lab", "site": "hydroponics"},
     "d7cfea8b0a84ad9c65znby": {"name": "Polyhouse 1", "site": "polyhouse1"},
+    "d7e5948f7fdb1a5dealitw": {"name": "Hydroponics AB", "site": "hydroponics"},
 }
 
 SITE_COLLECTIONS = {
