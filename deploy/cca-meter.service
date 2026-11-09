@@ -1,0 +1,15 @@
+[Unit]
+Description=CCA Power Meter Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/cca-power-meter/CCA-Power-meter
+ExecStart=/root/cca-power-meter/CCA-Power-meter/venv/bin/python server.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

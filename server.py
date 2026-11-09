@@ -45,6 +45,7 @@ _prev_online = {}
 # background thread, and browsers serve from this snapshot (no per-request hit).
 _poll_lock = threading.Lock()
 _last_polled_at = None
+_last_poll_error = None
 
 # ---------------------------------------------------------------------------
 # tinytuya LAN mode — DPS numeric key to Tuya code mapping
@@ -397,9 +398,10 @@ def _fetch_and_store():
         dev["fetched_at"] = now
         dev["fetched_at_ist"] = datetime.fromtimestamp(now, tz=IST).strftime("%Y-%m-%d %H:%M:%S")
 
-    global _last_all_status, _last_polled_at
+    global _last_all_status, _last_polled_at, _last_poll_error
     _last_all_status = results
     _last_polled_at = now
+    _last_poll_error = None
 
     for dev in results:
         _maybe_log_events(dev)
@@ -422,6 +424,8 @@ def _refresh_now():
                 _poll_lock.release()
     except Exception as e:
         logging.warning("Tuya refresh failed: %s", e)
+        global _last_poll_error
+        _last_poll_error = str(e)
     return _last_all_status
 
 
@@ -434,6 +438,8 @@ def _poll_loop():
                     _fetch_and_store()
         except Exception as e:
             logging.warning("background Tuya poll error: %s", e)
+            global _last_poll_error
+            _last_poll_error = str(e)
         time.sleep(config.TUYA_POLL_SEC)
 
 
@@ -736,6 +742,21 @@ def api_db_stats():
     return jsonify(db.db_stats())
 
 
+@app.route("/api/health")
+def api_health():
+    age = None if _last_polled_at is None else int(time.time() - _last_polled_at)
+    return jsonify({
+        "success": True,
+        "mode": "lan" if config.USE_LAN else "cloud",
+        "poll_interval_sec": config.TUYA_POLL_SEC,
+        "devices": len(config.DEVICES),
+        "polled_at": _last_polled_at,
+        "age_sec": age,
+        "stale": not _cache_fresh(),
+        "last_error": _last_poll_error,
+    })
+
+
 @app.route("/api/raw-dump")
 def raw_dump():
     device_id = request.args.get("device") or None
@@ -795,6 +816,5 @@ if __name__ == "__main__":
         print("  MongoDB not connected - running without persistence")
 
     threading.Thread(target=_poll_loop, name="tuya-poller", daemon=True).start()
-    _refresh_now()
 
     app.run(debug=config.FLASK_DEBUG, host=config.HOST, port=config.PORT)
